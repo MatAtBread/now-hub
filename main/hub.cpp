@@ -9,8 +9,8 @@
 #include "mqtt_client.h"
 #include "nvs_flash.h"
 
-#include "captiveportal/wifi-captiveportal.h"
-#include "gpio/gpio.hpp"
+#include "../common/captiveportal/wifi-captiveportal.h"
+#include "../common/gpio/gpio.hpp"
 
 // These should be configurable
 const char *MQTT_TOPIC = "FreeHouse";
@@ -464,7 +464,7 @@ extern "C" void app_main(void) {
     vTaskDelay(1000 / portTICK_PERIOD_MS);
     auto button = GPIO::digitalRead(IO_BUTTON);
     GPIO::digitalWrite(IO_LED_B, !button);
-    if (button == 0) {
+    if (button == 0 && (++pressed == 5)) {
           // Check for BOOT button, clear the nvs and restart
           nvs_open("storage", NVS_READWRITE, &nvs_handle);
           nvs_erase_key(nvs_handle,"ssid");
