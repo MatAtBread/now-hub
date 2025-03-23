@@ -1,4 +1,4 @@
-file(GLOB_RECURSE app_sources
+file(GLOB_RECURSE app_sources FOLLOW_SYMLINKS
     "${CMAKE_CURRENT_LIST_DIR}/*.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/*.c"
 )
