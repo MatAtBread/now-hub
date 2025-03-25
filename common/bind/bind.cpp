@@ -59,7 +59,7 @@ void *_bind(void *self, void *f) {
   }
   heap_caps_print_heap_info(MALLOC_CAP_32BIT | MALLOC_CAP_EXEC);
 
-  // Allocate executable space for the 7 preamble instructions that load "this" into A0 and call the target function
+  // Allocate executable space for the sizeof(ip) preamble instructions that load "this" into A0 and call the target function
   uint32_t *binding = (uint32_t *)heap_caps_malloc(sizeof(ip), MALLOC_CAP_EXEC | MALLOC_CAP_32BIT);
 #else
   uint32_t *binding = 0;
@@ -76,11 +76,13 @@ void *_bind(void *self, void *f) {
   } else {
     ESP_LOGI(TAG, "Binding function 0x%08lx() @0x%08lx to object 0x%08lx.", (uint32_t)f, (uint32_t)binding, (uint32_t)self);
     memcpy(binding, ip, sizeof(ip));
+    //__asm__("fence.i");
   }
   return binding;
 }
 
-void unbind(void *f) {
+template<typename T>
+void unbind(T f) {
 #ifdef CONFIG_BIND_USE_IRAM_HEAP
   heap_caps_free(f);
 #else

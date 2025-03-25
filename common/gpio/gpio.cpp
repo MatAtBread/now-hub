@@ -46,8 +46,10 @@ int GPIO::analogRead(int pin, adc_atten_t atten, bool calibrated) {
 
   adc_cali_handle_t adc1_cali_chan_handle = NULL;
   if (calibrated) {
-    if (!adc_calibration_init(ADC_UNIT_1, (adc_channel_t)pin, ADC_ATTEN_DB_12, &adc1_cali_chan_handle))
+    if (!adc_calibration_init(ADC_UNIT_1, (adc_channel_t)pin, ADC_ATTEN_DB_12, &adc1_cali_chan_handle)) {
+      ESP_LOGW(TAG,"ADC unit 1 failed calibration init");
       adc1_cali_chan_handle = NULL;
+    }
   }
 
   int adc_reading = 0;

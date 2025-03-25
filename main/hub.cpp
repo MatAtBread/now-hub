@@ -44,10 +44,19 @@ typedef char device_name_t[20];
 
 #define MAX_DEVICES ESP_NOW_MAX_TOTAL_PEER_NUM
 
-static MACAddr deviceMac[MAX_DEVICES] = {};
-static device_name_t deviceName[MAX_DEVICES] = {};
-static char *deviceInfo[MAX_DEVICES] = {};
-static int peerRssi[MAX_DEVICES] = {};
+typedef struct {
+  MACAddr mac;
+  device_name_t name;
+  char *info;
+  int peerRssi;
+  std::string pending;  // Accumulated JSON for any messages that failed to arrive at the destination device, to be sent on the next connection
+} device_t;
+// static MACAddr deviceMac[MAX_DEVICES] = {};
+// static device_name_t deviceName[MAX_DEVICES] = {};
+// static char *deviceInfo[MAX_DEVICES] = {};
+// static int peerRssi[MAX_DEVICES] = {};
+
+static device_t device[MAX_DEVICES];
 
 static MACAddr noDevice = {0, 0, 0, 0, 0, 0};
 
@@ -56,7 +65,7 @@ static uint8_t gateway_mac[6];
 
 static int findDeviceMac(const uint8_t *mac) {
   for (int i = 0; i < MAX_DEVICES; i++) {
-    if (memcmp(&deviceMac[i], mac, sizeof deviceMac[0]) == 0) {
+    if (memcmp(device[i].mac, mac, sizeof (device[i].mac[0])) == 0) {
       return i;
     }
   }
@@ -66,7 +75,7 @@ static int findDeviceMac(const uint8_t *mac) {
 
 static int findDeviceName(const char *name) {
   for (int i = 0; i < MAX_DEVICES; i++) {
-    if (strncmp(deviceName[i], name, sizeof(device_name_t)) == 0) {
+    if (strncmp(device[i].name, name, sizeof(device_name_t)) == 0) {
       return i;
     }
   }
@@ -78,18 +87,15 @@ static std::string hubStatusJson() {
   std::stringstream s;
   s << "[";
   for (int i = 0; i < MAX_DEVICES; i++) {
-    if (deviceName[i][0]) {
+    const device_t& dev = device[i];
+    if (dev.name[0]) {
       char mac[20];
-      sprintf(mac, MACSTR, MAC2STR(deviceMac[i]));
+      sprintf(mac, MACSTR, MAC2STR(dev.mac));
       s << "{"
-           "\"name\":\""
-        << deviceName[i] << "\","
-                            "\"mac\":\""
-        << mac << "\","
-                  "\"rssi\":"
-        << peerRssi[i] << ","
-                          "\"info\":"
-        << (char *)(deviceInfo[i] ? deviceInfo[i] : "null") << "}";
+           "\"name\":\"" << dev.name << "\","
+           "\"mac\":\"" << mac << "\","
+           "\"rssi\":" << dev.peerRssi << ","
+           "\"info\":" << (char *)(dev.info ? dev.info : "null") << "}";
     }
   }
   s << "]";
@@ -107,57 +113,88 @@ static char *bufAs0TermString(const void *s, size_t n) {
 static void mqtt_event_handler(void *args, esp_event_base_t base,
                                int32_t event_id, void *event_data) {
   esp_mqtt_event_handle_t event = (esp_mqtt_event_handle_t)event_data;
-  if (event->event_id == MQTT_EVENT_CONNECTED) {
-    esp_mqtt_client_publish(mqtt_client, MQTT_TOPIC, hubStatusJson().c_str(), 0, 1, RETAIN);
-    std::string topic = MQTT_TOPIC;
-    topic += "/#";
-    esp_mqtt_client_subscribe(mqtt_client, topic.c_str(), 1);
-  } else if (event->event_id == MQTT_EVENT_DATA) {
-    // Check if we're talking to ourselves
-    char *topic = bufAs0TermString(event->topic, event->topic_len);
-    if (!strcmp(topic, MQTT_TOPIC)) {
-      ESP_LOGD(TAG, "Ignore hub mqtt message");
-      free(topic);
-      return;
-    }
 
-    char *name = strchr(topic, '/');
-    if (!name) {
-      ESP_LOGI(TAG, "Missing name %s", topic);
-      free(topic);
-      return;
+  switch (event->event_id) {
+    case MQTT_EVENT_CONNECTED: {
+      esp_mqtt_client_publish(mqtt_client, MQTT_TOPIC, hubStatusJson().c_str(), 0, 1, RETAIN);
+      std::string topic = MQTT_TOPIC;
+      topic += "/#";
+      esp_mqtt_client_subscribe(mqtt_client, topic.c_str(), 1);
     }
-    name += 1;  // Skip the '/'
-    char *subtopic = strchr(name, '/');
-    if (subtopic) {
-      ESP_LOGD(TAG, "Ignore status message for %s", name);
-      free(topic);
-      return;  // Ignore our own status messages
-    }
+    break;
 
-    const auto deviceIndex = findDeviceName(name);
-    if (deviceIndex == -1) {
-      ESP_LOGI(TAG, "Unknown device %s", name);
-      free(topic);
-      return;
-    }
+    case MQTT_EVENT_DATA: {
+      // Check if we're talking to ourselves
+      char *topic = bufAs0TermString(event->topic, event->topic_len);
+      if (!strcmp(topic, MQTT_TOPIC)) {
+        ESP_LOGD(TAG, "Ignore hub mqtt message");
+        free(topic);
+        return;
+      }
 
-    if (event->data_len >= ESP_NOW_MAX_DATA_LEN_V2) {
-      ESP_LOGI(TAG, "Too much data for esp-now v2: %s %s", name, event->data);
-    } else {
-      auto target = deviceMac[deviceIndex];
-      auto str = (uint8_t *)bufAs0TermString(event->data, event->data_len);
-      esp_now_send(target, str, event->data_len + 1);
-      free(str);
+      char *name = strchr(topic, '/');
+      if (!name) {
+        ESP_LOGI(TAG, "Missing name %s", topic);
+        free(topic);
+        return;
+      }
+      name += 1;  // Skip the '/'
+      char *subtopic = strchr(name, '/');
+      if (subtopic) {
+        ESP_LOGD(TAG, "Ignore status message for %s", name);
+        free(topic);
+        return;  // Ignore our own status messages
+      }
+
+      const auto deviceIndex = findDeviceName(name);
+      if (deviceIndex == -1) {
+        ESP_LOGI(TAG, "Unknown device %s", name);
+        free(topic);
+        return;
+      }
+
+      if (event->data_len >= ESP_NOW_MAX_DATA_LEN_V2) {
+        ESP_LOGI(TAG, "Too much data for esp-now v2: %s %s", name, event->data);
+      } else {
+        auto target = device[deviceIndex].mac;
+        auto str = bufAs0TermString(event->data, event->data_len);
+        if (device[deviceIndex].pending.length()) {
+          // TODO: Merge pending messages
+        }
+        device[deviceIndex].pending = str;
+        esp_now_send(target, (uint8_t *)str, event->data_len + 1);
+        free(str);
+      }
+      free(topic);
     }
-    free(topic);
-  } else {
-    ESP_LOGI(TAG, "Unhandled MQTT event: %d", event->event_id);
+    break;
+
+    case MQTT_EVENT_PUBLISHED:
+    case MQTT_EVENT_SUBSCRIBED:
+    case MQTT_EVENT_BEFORE_CONNECT:
+      break;
+
+    default:
+      ESP_LOGI(TAG, "Unhandled MQTT event: %d", event->event_id);
   }
 }
 
 static uint32_t PAIR[] = {*((const uint32_t *)"PAIR"), 0};
 static uint32_t PACK[] = {*((const uint32_t *)"PACK"), 0};
+
+static void espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  const auto idx = findDeviceMac(mac_addr);
+  if (status != ESP_OK) {
+    ESP_LOGI(TAG,"Send to "MACSTR" (device %d) failed", MAC2STR(mac_addr), idx);
+  } else {
+    if (idx >= 0) {
+      if (device[idx].pending.length()) {
+        ESP_LOGI(TAG,"Delivered to %s: %s", device[idx].name, device[idx].pending.c_str());
+        device[idx].pending = "";
+      }
+    }
+  }
+}
 
 static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_t *data, int len) {
   if ((*(const uint32_t *)data) == PAIR[0]) {
@@ -165,7 +202,7 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
     auto deviceIndex = findDeviceMac(esp_now_info->src_addr);
     if (deviceIndex < 0) {
       for (int i = 0; i < MAX_DEVICES; i++) {
-        if (!memcmp(noDevice, &deviceMac[i], sizeof(noDevice))) {
+        if (!memcmp(noDevice, device[i].mac, sizeof(noDevice))) {
           deviceIndex = i;
           ESP_LOGI(TAG, "Assign " MACSTR ": slot %d", MAC2STR(esp_now_info->src_addr), deviceIndex);
           break;
@@ -184,14 +221,14 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
       }
       char *info = strtok(NULL, "");
       if (info) {
-        if (deviceInfo[deviceIndex]) free(deviceInfo[deviceIndex]);
-        deviceInfo[deviceIndex] = bufAs0TermString(info, strlen(info));
+        if (device[deviceIndex].info) free(device[deviceIndex].info);
+        device[deviceIndex].info = bufAs0TermString(info, strlen(info));
       }
-      memcpy(&deviceMac[deviceIndex], esp_now_info->src_addr, sizeof(MACAddr));
-      strncpy(deviceName[deviceIndex], name, sizeof(device_name_t));
+      memcpy(device[deviceIndex].mac, esp_now_info->src_addr, sizeof(MACAddr));
+      strncpy(device[deviceIndex].name, name, sizeof(device_name_t));
       free(name);
 
-      peerRssi[deviceIndex] = esp_now_info->rx_ctrl->rssi;
+      device[deviceIndex].peerRssi = esp_now_info->rx_ctrl->rssi;
 
       if (!esp_now_is_peer_exist(esp_now_info->src_addr)) {
         esp_now_peer_info_t peer;
@@ -203,6 +240,9 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
       }
       esp_now_send(esp_now_info->src_addr, (const uint8_t *)PACK, sizeof(PACK));
       esp_mqtt_client_publish(mqtt_client, MQTT_TOPIC, hubStatusJson().c_str(), 0, 1, RETAIN);
+
+      if (device[deviceIndex].pending.length())
+        esp_now_send(device[deviceIndex].mac, (const uint8_t *)device[deviceIndex].pending.c_str(), device[deviceIndex].pending.length()+1);
     } else {
       ESP_LOGE(TAG, "No device space for pairing %s " MACSTR, data + 4, MAC2STR(esp_now_info->src_addr));
     }
@@ -210,14 +250,18 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
     // Some JSON we need to forward to the MQTT broker
     auto deviceIndex = findDeviceMac(esp_now_info->src_addr);
     if (deviceIndex >= 0) {
-      peerRssi[deviceIndex] = esp_now_info->rx_ctrl->rssi;
+      device[deviceIndex].peerRssi = esp_now_info->rx_ctrl->rssi;
       std::string topic = MQTT_TOPIC;
       topic += "/";
-      topic += deviceName[deviceIndex];
+      topic += device[deviceIndex].name;
       topic += "/status";
 
       esp_mqtt_client_publish(mqtt_client, topic.c_str(), (const char *)data, len, 1, RETAIN);
       esp_mqtt_client_publish(mqtt_client, MQTT_TOPIC, hubStatusJson().c_str(), 0, 1, RETAIN);
+
+      if (device[deviceIndex].pending.length())
+        esp_now_send(device[deviceIndex].mac, (const uint8_t *)device[deviceIndex].pending.c_str(), device[deviceIndex].pending.length()+1);
+
     }
   } else {
     ESP_LOGI(TAG, "Unknown message from " MACSTR " %s", MAC2STR(esp_now_info->src_addr), data);
@@ -245,36 +289,36 @@ static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_
 }
 
 class ConfigPortal : public HttpGetHandler {
-  protected:
+ protected:
   bool startsWith(const char *search, const char *match) {
-    return strncmp(search, match, strlen(match))==0;
+    return strncmp(search, match, strlen(match)) == 0;
   }
 
   static uint8_t hexValue(const char c) {
-  if (c >= '0' && c <= '9') return c - '0';
-  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-  return 0;
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return 0;
   }
 
   static void unencode(char *buf, const char *src, int size) {
-  while (*src && size) {
-    if (*src == '%') {
-      auto msn = hexValue(src[1]);
-      auto lsn = hexValue(src[2]);
-      src += 3;
-      *buf++ = (char)(msn * 16 + lsn);
-    } else {
-      *buf++ = *src++;
-      size--;
+    while (*src && size) {
+      if (*src == '%') {
+        auto msn = hexValue(src[1]);
+        auto lsn = hexValue(src[2]);
+        src += 3;
+        *buf++ = (char)(msn * 16 + lsn);
+      } else {
+        *buf++ = *src++;
+        size--;
+      }
     }
-  }
-  *buf = 0;
+    *buf = 0;
   }
 
-  public:
+ public:
   wifi_sta_config_t &sta;
-  char* mqtt_server;
+  char *mqtt_server;
   bool done;
   bool cancelled;
 
@@ -285,8 +329,6 @@ class ConfigPortal : public HttpGetHandler {
 
   esp_err_t getHandler(httpd_req_t *req) {
     ESP_LOGI(TAG, "Serve %s", req->uri);
-
-
     if (startsWith(req->uri, "/set-wifi/")) {
       char input_param[sizeof (req->uri)];
       strncpy(input_param, req->uri + 10, sizeof (req->uri));
@@ -447,6 +489,7 @@ extern "C" void app_main(void) {
   // Initialize ESP-NOW
   ESP_ERROR_CHECK(esp_now_init());
   ESP_ERROR_CHECK(esp_now_register_recv_cb(espnow_recv_cb));
+  ESP_ERROR_CHECK(esp_now_register_send_cb(espnow_send_cb));
 
   // Initialize MQTT
   std::string mqtt = "mqtt://";
@@ -461,11 +504,11 @@ extern "C" void app_main(void) {
 
   int pressed = 0;
   while (1) {
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
     auto button = GPIO::digitalRead(IO_BUTTON);
     GPIO::digitalWrite(IO_LED_B, !button);
-    if (button == 0 && (++pressed == 5)) {
-          // Check for BOOT button, clear the nvs and restart
+    if (button == 0) {
+      // Check for BOOT button, clear the nvs and restart
+      if (++pressed == 10) {
           nvs_open("storage", NVS_READWRITE, &nvs_handle);
           nvs_erase_key(nvs_handle,"ssid");
           nvs_erase_key(nvs_handle,"wifipwd");
@@ -473,7 +516,12 @@ extern "C" void app_main(void) {
           nvs_close(nvs_handle);
           GPIO::digitalWrite(IO_LED_B, 0);
           esp_restart();
+      }
+      GPIO::digitalWrite(IO_LED_B, pressed & 1);
+      vTaskDelay(250 / portTICK_PERIOD_MS);
+    } else {
+      pressed = 0;
+      vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
-    pressed = 0;
   }
 }

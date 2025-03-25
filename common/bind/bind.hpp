@@ -26,7 +26,7 @@ bind(Derived *self, ReturnType (Base::*func)(Args...)) {
     );
 }
 
-
-void unbind(void *f);
+template<typename T>
+void unbind(T f);
 
 //#define bind(THIS, MFP) _bind(reinterpret_cast<void*>(THIS),reinterpret_cast<void*>(MFP))
