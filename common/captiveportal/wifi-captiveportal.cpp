@@ -21,7 +21,6 @@
 #include "esp_http_server.h"
 #include "dns_server.h"
 
-#include "../bind/bind.hpp"
 #include "wifi-captiveportal.h"
 
 #undef CONFIG_ESP_ENABLE_DHCP_CAPTIVEPORTAL
@@ -140,8 +139,14 @@ esp_err_t http_404_error_handler(httpd_req_t *req, httpd_err_code_t err)
 //     return server;
 // }
 
-void start_captive_portal(HttpGetHandler *handler, const char *ssid)
+static HttpGetHandler *handler;
+static esp_err_t getHandler(httpd_req_t *req) {
+    return handler->getHandler(req);
+}
+
+void start_captive_portal(HttpGetHandler *_handler, const char *ssid)
 {
+    handler = _handler;
     /*
         Turn of warnings from HTTP server as redirecting traffic will yield
         lots of invalid requests
@@ -177,7 +182,7 @@ void start_captive_portal(HttpGetHandler *handler, const char *ssid)
             static const httpd_uri_t anyGet = {
                 .uri = "*",
                 .method = HTTP_GET,
-                .handler = bind(handler, &HttpGetHandler::getHandler)
+                .handler = getHandler
             };
 
             httpd_register_uri_handler(server, &anyGet);

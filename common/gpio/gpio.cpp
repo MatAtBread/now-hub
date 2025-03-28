@@ -36,7 +36,11 @@ int GPIO::analogRead(int pin, adc_atten_t atten, bool calibrated) {
   adc_oneshot_unit_handle_t adc_handle;
   adc_oneshot_unit_init_cfg_t unit_config = { ADC_UNIT_1, ADC_DIGI_CLK_SRC_DEFAULT, ADC_ULP_MODE_DISABLE };
 
-  ESP_ERROR_CHECK(adc_oneshot_new_unit(&unit_config, &adc_handle));
+  if (ESP_ERROR_CHECK_WITHOUT_ABORT(adc_oneshot_new_unit(&unit_config, &adc_handle)) != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to create ADC unit for pin %d", pin);
+    return -1;
+  }
+
   adc_oneshot_chan_cfg_t config = {
     .atten = atten, // = approx 400mv -> 3800mv. Note: battery is divided by 2 in hardware
     .bitwidth = ADC_BITWIDTH_12,

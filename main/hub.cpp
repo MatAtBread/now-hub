@@ -3,21 +3,22 @@
 #include <sstream>
 #include <string>
 
+#include "../common/captiveportal/wifi-captiveportal.h"
+#include "../common/gpio/gpio.hpp"
 #include "esp_log.h"
 #include "esp_now.h"
 #include "esp_wifi.h"
 #include "mqtt_client.h"
 #include "nvs_flash.h"
 
-#include "../common/captiveportal/wifi-captiveportal.h"
-#include "../common/gpio/gpio.hpp"
-
 // These should be configurable
 const char *MQTT_TOPIC = "FreeHouse";
-#define IO_LED_R  3
-#define IO_LED_G  4
-#define IO_LED_B  5
+#define IO_LED_R 3
+#define IO_LED_G 4
+#define IO_LED_B 5
 #define IO_BUTTON 9
+
+#define DEVICE_TIMEOUT 86400000UL  // 1 day
 
 #define MACSTR "%02X:%02X:%02X:%02X:%02X:%02X"
 #define MAC2STR(mac) mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
@@ -34,8 +35,8 @@ ESP-NOW messages are strings:
     {json}              Sent from MQTT broker to end-device and from end-device to MQTT broker. Validation is done by the end-device and/or the broker. This hub doesn't validate the date
 
 MQTT topics:
-    FreeHouse/NAME/status   Status message forwarded by the hub deom the esp-now device to the MQTT broker
-    FreeHouse/NAME          Data message sent by other devices to the hub, destined for the esp-now device with the specified NAME
+    FreeHouse/NAME          The state of the device: a message forwarded by the hub from the esp-now device to the MQTT broker (ie hub RX, )
+    FreeHouse/NAME/set      Data message sent by other devices to the hub, destined for the esp-now device with the specified NAME
     FreeHouse               Hub status
 */
 
@@ -50,11 +51,8 @@ typedef struct {
   char *info;
   int peerRssi;
   std::string pending;  // Accumulated JSON for any messages that failed to arrive at the destination device, to be sent on the next connection
+  uint32_t lastSeen;    // TODO
 } device_t;
-// static MACAddr deviceMac[MAX_DEVICES] = {};
-// static device_name_t deviceName[MAX_DEVICES] = {};
-// static char *deviceInfo[MAX_DEVICES] = {};
-// static int peerRssi[MAX_DEVICES] = {};
 
 static device_t device[MAX_DEVICES];
 
@@ -65,11 +63,10 @@ static uint8_t gateway_mac[6];
 
 static int findDeviceMac(const uint8_t *mac) {
   for (int i = 0; i < MAX_DEVICES; i++) {
-    if (memcmp(device[i].mac, mac, sizeof (device[i].mac[0])) == 0) {
+    if (memcmp(device[i].mac, mac, sizeof(device[i].mac[0])) == 0) {
       return i;
     }
   }
-  ESP_LOGW(TAG, "No paired device for MAC " MACSTR, MAC2STR(mac));
   return -1;
 }
 
@@ -79,7 +76,6 @@ static int findDeviceName(const char *name) {
       return i;
     }
   }
-  ESP_LOGW(TAG, "No paired device for '%s'", name);
   return -1;
 }
 
@@ -87,15 +83,16 @@ static std::string hubStatusJson() {
   std::stringstream s;
   s << "[";
   for (int i = 0; i < MAX_DEVICES; i++) {
-    const device_t& dev = device[i];
+    const device_t &dev = device[i];
     if (dev.name[0]) {
       char mac[20];
       sprintf(mac, MACSTR, MAC2STR(dev.mac));
       s << "{"
-           "\"name\":\"" << dev.name << "\","
-           "\"mac\":\"" << mac << "\","
-           "\"rssi\":" << dev.peerRssi << ","
-           "\"info\":" << (char *)(dev.info ? dev.info : "null") << "}";
+        "\"name\":\"" << dev.name << "\","
+        "\"mac\":\"" << mac << "\","
+        "\"rssi\":" << dev.peerRssi << ","
+        "\"info\":" << (char *)(dev.info ? dev.info : "null")
+        << "}";
     }
   }
   s << "]";
@@ -120,8 +117,7 @@ static void mqtt_event_handler(void *args, esp_event_base_t base,
       std::string topic = MQTT_TOPIC;
       topic += "/#";
       esp_mqtt_client_subscribe(mqtt_client, topic.c_str(), 1);
-    }
-    break;
+    } break;
 
     case MQTT_EVENT_DATA: {
       // Check if we're talking to ourselves
@@ -166,8 +162,7 @@ static void mqtt_event_handler(void *args, esp_event_base_t base,
         free(str);
       }
       free(topic);
-    }
-    break;
+    } break;
 
     case MQTT_EVENT_PUBLISHED:
     case MQTT_EVENT_SUBSCRIBED:
@@ -181,15 +176,29 @@ static void mqtt_event_handler(void *args, esp_event_base_t base,
 
 static uint32_t PAIR[] = {*((const uint32_t *)"PAIR"), 0};
 static uint32_t PACK[] = {*((const uint32_t *)"PACK"), 0};
+static uint32_t NACK[] = {*((const uint32_t *)"NACK"), 0};
+
+static void sendNACK(const uint8_t *mac_addr) {
+  if (!esp_now_is_peer_exist(mac_addr)) {
+    esp_now_peer_info_t peer;
+    memset(&peer, 0, sizeof(peer));
+    peer.ifidx = WIFI_IF_STA;
+    memcpy(&peer.peer_addr, mac_addr, sizeof(MACAddr));
+
+    esp_now_add_peer(&peer);
+  }
+  esp_now_send(mac_addr, (uint8_t *)NACK, sizeof(NACK));
+  esp_now_del_peer(mac_addr);
+}
 
 static void espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status) {
   const auto idx = findDeviceMac(mac_addr);
   if (status != ESP_OK) {
-    ESP_LOGI(TAG,"Send to "MACSTR" (device %d) failed", MAC2STR(mac_addr), idx);
+    ESP_LOGI(TAG, "Send to " MACSTR " (device %d) failed", MAC2STR(mac_addr), idx);
   } else {
     if (idx >= 0) {
       if (device[idx].pending.length()) {
-        ESP_LOGI(TAG,"Delivered to %s: %s", device[idx].name, device[idx].pending.c_str());
+        ESP_LOGI(TAG, "Delivered to %s: %s", device[idx].name, device[idx].pending.c_str());
         device[idx].pending = "";
       }
     }
@@ -242,15 +251,18 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
       esp_mqtt_client_publish(mqtt_client, MQTT_TOPIC, hubStatusJson().c_str(), 0, 1, RETAIN);
 
       if (device[deviceIndex].pending.length())
-        esp_now_send(device[deviceIndex].mac, (const uint8_t *)device[deviceIndex].pending.c_str(), device[deviceIndex].pending.length()+1);
+        esp_now_send(device[deviceIndex].mac, (const uint8_t *)device[deviceIndex].pending.c_str(), device[deviceIndex].pending.length() + 1);
     } else {
       ESP_LOGE(TAG, "No device space for pairing %s " MACSTR, data + 4, MAC2STR(esp_now_info->src_addr));
+      sendNACK(esp_now_info->src_addr);
     }
   } else if (*data == '{') {
     // Some JSON we need to forward to the MQTT broker
     auto deviceIndex = findDeviceMac(esp_now_info->src_addr);
     if (deviceIndex >= 0) {
       device[deviceIndex].peerRssi = esp_now_info->rx_ctrl->rssi;
+      device[deviceIndex].lastSeen = esp_log_early_timestamp();
+
       std::string topic = MQTT_TOPIC;
       topic += "/";
       topic += device[deviceIndex].name;
@@ -260,8 +272,11 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
       esp_mqtt_client_publish(mqtt_client, MQTT_TOPIC, hubStatusJson().c_str(), 0, 1, RETAIN);
 
       if (device[deviceIndex].pending.length())
-        esp_now_send(device[deviceIndex].mac, (const uint8_t *)device[deviceIndex].pending.c_str(), device[deviceIndex].pending.length()+1);
+        esp_now_send(device[deviceIndex].mac, (const uint8_t *)device[deviceIndex].pending.c_str(), device[deviceIndex].pending.length() + 1);
 
+    } else {
+      ESP_LOGI(TAG, "NACK data from unknown device " MACSTR " %.*s", MAC2STR(esp_now_info->src_addr), len, data);
+      sendNACK(esp_now_info->src_addr);
     }
   } else {
     ESP_LOGI(TAG, "Unknown message from " MACSTR " %s", MAC2STR(esp_now_info->src_addr), data);
@@ -330,14 +345,14 @@ class ConfigPortal : public HttpGetHandler {
   esp_err_t getHandler(httpd_req_t *req) {
     ESP_LOGI(TAG, "Serve %s", req->uri);
     if (startsWith(req->uri, "/set-wifi/")) {
-      char input_param[sizeof (req->uri)];
-      strncpy(input_param, req->uri + 10, sizeof (req->uri));
+      char input_param[sizeof(req->uri)];
+      strncpy(input_param, req->uri + 10, sizeof(req->uri));
       strtok(input_param, "-");
-      const char *in_pwd = strtok(NULL,"-");
-      const char *in_mqtt = strtok(NULL,"-");
+      const char *in_pwd = strtok(NULL, "-");
+      const char *in_mqtt = strtok(NULL, "-");
 
-      unencode((char *)sta.ssid,input_param,sizeof (sta.ssid));
-      if (in_pwd) unencode((char *)sta.password,in_pwd,sizeof (sta.password));
+      unencode((char *)sta.ssid, input_param, sizeof(sta.ssid));
+      if (in_pwd) unencode((char *)sta.password, in_pwd, sizeof(sta.password));
       if (in_mqtt) unencode(mqtt_server, in_mqtt, 64);
       if (strlen((const char *)sta.ssid) && in_pwd && strlen((const char *)sta.password) && in_mqtt && strlen(mqtt_server)) {
         done = true;
@@ -409,30 +424,34 @@ extern "C" void app_main(void) {
     ) {
     ESP_LOGI(TAG, "No wifi credentials found");
     // Start captive portal which sets nvs keys
-    mqtt_uri[sizeof (mqtt_uri)-1] = 0;
-    wifi_config.sta.ssid[sizeof (wifi_config.sta.ssid)-1] = 0;
-    wifi_config.sta.password[sizeof (wifi_config.sta.password)-1] = 0;
-
-    GPIO::digitalWrite(IO_LED_G, 1);
+    mqtt_uri[sizeof(mqtt_uri) - 1] = 0;
+    wifi_config.sta.ssid[sizeof(wifi_config.sta.ssid) - 1] = 0;
+    wifi_config.sta.password[sizeof(wifi_config.sta.password) - 1] = 0;
 
     auto portal = new ConfigPortal(wifi_config.sta, mqtt_uri);
 
     bool led = true;
     while (true) {
       led = !led;
+      // Flashing magenta - captive portal is running
+      GPIO::digitalWrite(IO_LED_B, led);
       GPIO::digitalWrite(IO_LED_R, led);
+      GPIO::digitalWrite(IO_LED_G, 0);
+
       vTaskDelay(1000 / portTICK_PERIOD_MS);
       if (portal->done) {
-        ESP_LOGI(TAG,"Confirmed config ssid %s (%s), mqtt %s (%s)", portal->sta.ssid, wifi_config.sta.ssid, portal->mqtt_server, mqtt_uri);
-        nvs_set_str(nvs_handle, "ssid", (const char*)portal->sta.ssid);
-        nvs_set_str(nvs_handle, "wifipwd", (const char*)portal->sta.password);
+        ESP_LOGI(TAG, "Confirmed config ssid %s (%s), mqtt %s (%s)", portal->sta.ssid, wifi_config.sta.ssid, portal->mqtt_server, mqtt_uri);
+        nvs_set_str(nvs_handle, "ssid", (const char *)portal->sta.ssid);
+        nvs_set_str(nvs_handle, "wifipwd", (const char *)portal->sta.password);
         nvs_set_str(nvs_handle, "mqtt", portal->mqtt_server);
         nvs_close(nvs_handle);
+        GPIO::digitalWrite(IO_LED_B, 0);
         GPIO::digitalWrite(IO_LED_R, 0);
         esp_restart();
       }
       if (portal->cancelled) {
         nvs_close(nvs_handle);
+        GPIO::digitalWrite(IO_LED_B, 0);
         GPIO::digitalWrite(IO_LED_R, 0);
         esp_restart();
       }
@@ -458,8 +477,10 @@ extern "C" void app_main(void) {
   // Start WiFi
   ESP_ERROR_CHECK(esp_wifi_start());
 
-  // Wait for connection
-  ESP_LOGI(TAG, "Connecting to WiFi %s",wifi_config.sta.ssid);
+  // Yellow LED - connecting
+  GPIO::digitalWrite(IO_LED_R, 1);
+  GPIO::digitalWrite(IO_LED_G, 1);
+  ESP_LOGI(TAG, "Connecting to WiFi %s", wifi_config.sta.ssid);
   xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
 
   // Get MAC address
@@ -469,22 +490,28 @@ extern "C" void app_main(void) {
   wifi_second_chan_t secondary_channel = WIFI_SECOND_CHAN_NONE;
   esp_err_t result = esp_wifi_get_channel(&primary_channel, &secondary_channel);
 
-  if (result == ESP_OK) {
-    ESP_LOGI(TAG,
-             "WiFi connected %s: Primary channel: %d, Secondary channel: %d, MAC %02x:%02x:%02x:%02x:%02x:%02x",
-             wifi_config.sta.ssid,
-             primary_channel,
-             secondary_channel,
-             gateway_mac[0],
-             gateway_mac[1],
-             gateway_mac[2],
-             gateway_mac[3],
-             gateway_mac[4],
-             gateway_mac[5]);
-  } else {
+  if (result != ESP_OK) {
+    // Red LED - no network
+    GPIO::digitalWrite(IO_LED_R, 1);
+    GPIO::digitalWrite(IO_LED_G, 0);
     ESP_LOGE(TAG, "Failed to get channel: %d", result);
     return;
   }
+
+  // Green LED - connected
+  GPIO::digitalWrite(IO_LED_R, 0);
+  GPIO::digitalWrite(IO_LED_G, 1);
+  ESP_LOGI(TAG,
+           "WiFi connected %s: Primary channel: %d, Secondary channel: %d, MAC %02x:%02x:%02x:%02x:%02x:%02x",
+           wifi_config.sta.ssid,
+           primary_channel,
+           secondary_channel,
+           gateway_mac[0],
+           gateway_mac[1],
+           gateway_mac[2],
+           gateway_mac[3],
+           gateway_mac[4],
+           gateway_mac[5]);
 
   // Initialize ESP-NOW
   ESP_ERROR_CHECK(esp_now_init());
@@ -495,7 +522,7 @@ extern "C" void app_main(void) {
   std::string mqtt = "mqtt://";
   mqtt += mqtt_uri;
   esp_mqtt_client_config_t mqtt_cfg = {
-      .broker = {.address = {.uri = mqtt.c_str() }},
+      .broker = {.address = {.uri = mqtt.c_str()}},
       .network = {.disable_auto_reconnect = false}};
 
   mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
@@ -503,25 +530,38 @@ extern "C" void app_main(void) {
   esp_mqtt_client_start(mqtt_client);
 
   int pressed = 0;
+  // LED off: running
+  GPIO::digitalWrite(IO_LED_G, 0);
   while (1) {
     auto button = GPIO::digitalRead(IO_BUTTON);
     GPIO::digitalWrite(IO_LED_B, !button);
     if (button == 0) {
       // Check for BOOT button, clear the nvs and restart
       if (++pressed == 10) {
-          nvs_open("storage", NVS_READWRITE, &nvs_handle);
-          nvs_erase_key(nvs_handle,"ssid");
-          nvs_erase_key(nvs_handle,"wifipwd");
-          nvs_erase_key(nvs_handle,"mqtt");
-          nvs_close(nvs_handle);
-          GPIO::digitalWrite(IO_LED_B, 0);
-          esp_restart();
+        nvs_open("storage", NVS_READWRITE, &nvs_handle);
+        nvs_erase_key(nvs_handle, "ssid");
+        nvs_erase_key(nvs_handle, "wifipwd");
+        nvs_erase_key(nvs_handle, "mqtt");
+        nvs_close(nvs_handle);
+        GPIO::digitalWrite(IO_LED_B, 0);
+        esp_restart();
       }
       GPIO::digitalWrite(IO_LED_B, pressed & 1);
       vTaskDelay(250 / portTICK_PERIOD_MS);
     } else {
       pressed = 0;
       vTaskDelay(1000 / portTICK_PERIOD_MS);
+    }
+
+    auto now = esp_log_early_timestamp();
+    for (int i = 0; i < MAX_DEVICES; i++) {
+      if (device[i].name[0] && now - device[i].lastSeen > DEVICE_TIMEOUT) {
+        ESP_LOGI(TAG, "Device %s timed out", device[i].name);
+        memset(device[i].name, 0, sizeof(device[i].name));
+        memset(device[i].mac, 0, sizeof(device[i].mac));
+        if (device[i].info) free(device[i].info);
+        device[i].info = NULL;
+      }
     }
   }
 }
