@@ -91,7 +91,8 @@ static std::string hubStatusJson() {
         "\"name\":\"" << dev.name << "\","
         "\"mac\":\"" << mac << "\","
         "\"rssi\":" << dev.peerRssi << ","
-        "\"info\":" << (char *)(dev.info ? dev.info : "null")
+        "\"info\":" << (char *)(dev.info ? dev.info : "null") << ","
+        "\"lastSeen\":" << esp_log_early_timestamp() - dev.lastSeen
         << "}";
     }
   }
@@ -120,7 +121,9 @@ static void mqtt_event_handler(void *args, esp_event_base_t base,
     } break;
 
     case MQTT_EVENT_DATA: {
-      // Check if we're talking to ourselves
+      // Check if we're talking to ourselves, specifically we need to check the topic looks like "FreeHouse/NAME/set"
+      // and the data is a JSON string. We don't care about the rest of the MQTT stuff.
+
       char *topic = bufAs0TermString(event->topic, event->topic_len);
       if (!strcmp(topic, MQTT_TOPIC)) {
         ESP_LOGD(TAG, "Ignore hub mqtt message");
@@ -136,11 +139,12 @@ static void mqtt_event_handler(void *args, esp_event_base_t base,
       }
       name += 1;  // Skip the '/'
       char *subtopic = strchr(name, '/');
-      if (subtopic) {
+      if (!subtopic || strcmp(subtopic, "/set")) {
         ESP_LOGD(TAG, "Ignore status message for %s", name);
         free(topic);
         return;  // Ignore our own status messages
       }
+      *subtopic = 0;  // Terminate the name string
 
       const auto deviceIndex = findDeviceName(name);
       if (deviceIndex == -1) {
@@ -266,7 +270,6 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
       std::string topic = MQTT_TOPIC;
       topic += "/";
       topic += device[deviceIndex].name;
-      topic += "/status";
 
       esp_mqtt_client_publish(mqtt_client, topic.c_str(), (const char *)data, len, 1, RETAIN);
       esp_mqtt_client_publish(mqtt_client, MQTT_TOPIC, hubStatusJson().c_str(), 0, 1, RETAIN);
