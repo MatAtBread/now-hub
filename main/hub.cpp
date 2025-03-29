@@ -51,7 +51,7 @@ typedef struct {
   char *info;
   int peerRssi;
   std::string pending;  // Accumulated JSON for any messages that failed to arrive at the destination device, to be sent on the next connection
-  uint32_t lastSeen;    // TODO
+  uint32_t lastSeen;
 } device_t;
 
 static device_t device[MAX_DEVICES];
@@ -79,21 +79,30 @@ static int findDeviceName(const char *name) {
   return -1;
 }
 
+static std::string deviceJson(const device_t &dev, const char *payload = NULL) {
+  std::stringstream s;
+  char mac[20];
+  sprintf(mac, MACSTR, MAC2STR(dev.mac));
+  s << "{"
+    "\"name\":\"" << dev.name << "\","
+    "\"mac\":\"" << mac << "\","
+    "\"rssi\":" << dev.peerRssi << ","
+    "\"info\":" << (char *)(dev.info ? dev.info : "null") << ","
+    "\"lastSeen\":" << (signed)(esp_log_early_timestamp() - dev.lastSeen);
+
+    if (payload) s << "," << "\"payload\":" << payload;
+    s << "}";
+  return s.str();
+}
+
 static std::string hubStatusJson() {
   std::stringstream s;
   s << "[";
   for (int i = 0; i < MAX_DEVICES; i++) {
     const device_t &dev = device[i];
     if (dev.name[0]) {
-      char mac[20];
-      sprintf(mac, MACSTR, MAC2STR(dev.mac));
-      s << "{"
-        "\"name\":\"" << dev.name << "\","
-        "\"mac\":\"" << mac << "\","
-        "\"rssi\":" << dev.peerRssi << ","
-        "\"info\":" << (char *)(dev.info ? dev.info : "null") << ","
-        "\"lastSeen\":" << esp_log_early_timestamp() - dev.lastSeen
-        << "}";
+      if (i) s << ",";
+      s << deviceJson(dev);
     }
   }
   s << "]";
@@ -125,30 +134,17 @@ static void mqtt_event_handler(void *args, esp_event_base_t base,
       // and the data is a JSON string. We don't care about the rest of the MQTT stuff.
 
       char *topic = bufAs0TermString(event->topic, event->topic_len);
-      if (!strcmp(topic, MQTT_TOPIC)) {
+      char *root = strtok(topic, "/");
+      char *name = strtok(NULL, "/");
+      char *subtopic = strtok(NULL, "/");
+      int deviceIndex;
+
+      if (!name
+        || !subtopic
+        || strcmp(root, MQTT_TOPIC)
+        || strcmp(subtopic, "set")
+        || (deviceIndex = findDeviceName(name)) == -1) {
         ESP_LOGD(TAG, "Ignore hub mqtt message");
-        free(topic);
-        return;
-      }
-
-      char *name = strchr(topic, '/');
-      if (!name) {
-        ESP_LOGI(TAG, "Missing name %s", topic);
-        free(topic);
-        return;
-      }
-      name += 1;  // Skip the '/'
-      char *subtopic = strchr(name, '/');
-      if (!subtopic || strcmp(subtopic, "/set")) {
-        ESP_LOGD(TAG, "Ignore status message for %s", name);
-        free(topic);
-        return;  // Ignore our own status messages
-      }
-      *subtopic = 0;  // Terminate the name string
-
-      const auto deviceIndex = findDeviceName(name);
-      if (deviceIndex == -1) {
-        ESP_LOGI(TAG, "Unknown device %s", name);
         free(topic);
         return;
       }
@@ -223,8 +219,10 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
       }
     }
     if (deviceIndex >= 0) {
+      device[deviceIndex].peerRssi = esp_now_info->rx_ctrl->rssi;
+      device[deviceIndex].lastSeen = esp_log_early_timestamp();
       char *name = bufAs0TermString(data + 4, len - 4);
-      ESP_LOGI(TAG, "PAIR " MACSTR ": %s", MAC2STR(esp_now_info->src_addr), name);
+      // ESP_LOGI(TAG, "PAIR " MACSTR ": %s", MAC2STR(esp_now_info->src_addr), name);
       strtok(name, PAIR_DELIM);
       char *hub = strtok(NULL, PAIR_DELIM);
       if (!hub || strcmp(hub, MQTT_TOPIC)) {
@@ -240,8 +238,6 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
       memcpy(device[deviceIndex].mac, esp_now_info->src_addr, sizeof(MACAddr));
       strncpy(device[deviceIndex].name, name, sizeof(device_name_t));
       free(name);
-
-      device[deviceIndex].peerRssi = esp_now_info->rx_ctrl->rssi;
 
       if (!esp_now_is_peer_exist(esp_now_info->src_addr)) {
         esp_now_peer_info_t peer;
@@ -271,7 +267,11 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
       topic += "/";
       topic += device[deviceIndex].name;
 
-      esp_mqtt_client_publish(mqtt_client, topic.c_str(), (const char *)data, len, 1, RETAIN);
+      // We wrap the JSON in the hub-specific data as a `payload`
+      char *payload = bufAs0TermString(data, len);
+      esp_mqtt_client_publish(mqtt_client, topic.c_str(), deviceJson(device[deviceIndex], payload).c_str(), 0, 1, RETAIN);
+      free(payload);
+      // esp_mqtt_client_publish(mqtt_client, topic.c_str(), (const char *)data, len, 1, RETAIN);
       esp_mqtt_client_publish(mqtt_client, MQTT_TOPIC, hubStatusJson().c_str(), 0, 1, RETAIN);
 
       if (device[deviceIndex].pending.length())
@@ -392,6 +392,7 @@ class ConfigPortal : public HttpGetHandler {
 };
 
 extern "C" void app_main(void) {
+  esp_log_level_set(TAG, ESP_LOG_VERBOSE);
   // Initialize NVS
   esp_err_t ret = nvs_flash_init();
   if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -558,7 +559,7 @@ extern "C" void app_main(void) {
 
     auto now = esp_log_early_timestamp();
     for (int i = 0; i < MAX_DEVICES; i++) {
-      if (device[i].name[0] && now - device[i].lastSeen > DEVICE_TIMEOUT) {
+      if (device[i].name[0] && (signed)(now - device[i].lastSeen) > DEVICE_TIMEOUT) {
         ESP_LOGI(TAG, "Device %s timed out", device[i].name);
         memset(device[i].name, 0, sizeof(device[i].name));
         memset(device[i].mac, 0, sizeof(device[i].mac));
