@@ -63,7 +63,8 @@ static uint8_t gateway_mac[6];
 
 static int findDeviceMac(const uint8_t *mac) {
   for (int i = 0; i < MAX_DEVICES; i++) {
-    if (memcmp(device[i].mac, mac, sizeof(device[i].mac[0])) == 0) {
+    if (memcmp(device[i].mac, mac, sizeof(device[i].mac)) == 0) {
+      // ESP_LOGI(TAG, "Found device %d " MACSTR " " MACSTR, i, MAC2STR(mac), MAC2STR(mac));
       return i;
     }
   }
@@ -88,7 +89,7 @@ static std::string deviceJson(const device_t &dev, const char *payload = NULL) {
     "\"mac\":\"" << mac << "\","
     "\"rssi\":" << dev.peerRssi << ","
     "\"info\":" << (char *)(dev.info ? dev.info : "null") << ","
-    "\"lastSeen\":" << (signed)(esp_log_early_timestamp() - dev.lastSeen);
+    "\"lastSeen\":" << (signed)(esp_log_timestamp() - dev.lastSeen);
 
     if (payload) s << "," << "\"payload\":" << payload;
     s << "}";
@@ -220,7 +221,7 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
     }
     if (deviceIndex >= 0) {
       device[deviceIndex].peerRssi = esp_now_info->rx_ctrl->rssi;
-      device[deviceIndex].lastSeen = esp_log_early_timestamp();
+      device[deviceIndex].lastSeen = esp_log_timestamp();
       char *name = bufAs0TermString(data + 4, len - 4);
       // ESP_LOGI(TAG, "PAIR " MACSTR ": %s", MAC2STR(esp_now_info->src_addr), name);
       strtok(name, PAIR_DELIM);
@@ -261,7 +262,7 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
     auto deviceIndex = findDeviceMac(esp_now_info->src_addr);
     if (deviceIndex >= 0) {
       device[deviceIndex].peerRssi = esp_now_info->rx_ctrl->rssi;
-      device[deviceIndex].lastSeen = esp_log_early_timestamp();
+      device[deviceIndex].lastSeen = esp_log_timestamp();
 
       std::string topic = MQTT_TOPIC;
       topic += "/";
@@ -306,6 +307,15 @@ static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_
   }
 }
 
+void unpairDevice(int i) {
+  ESP_LOGI(TAG, "Unpair device %s (%d)", device[i].name, i);
+
+  memset(device[i].name, 0, sizeof(device[i].name));
+  memset(device[i].mac, 0, sizeof(device[i].mac));
+  if (device[i].info) free(device[i].info);
+  device[i].info = NULL;
+}
+
 class ConfigPortal : public HttpGetHandler {
  protected:
   bool startsWith(const char *search, const char *match) {
@@ -342,12 +352,14 @@ class ConfigPortal : public HttpGetHandler {
 
   ConfigPortal(wifi_sta_config_t &sta, char *mqtt_server) : sta(sta), mqtt_server(mqtt_server) {
     done = cancelled = false;
-    start_captive_portal(this, "FreeHouse-HUB");
   }
 
   esp_err_t getHandler(httpd_req_t *req) {
     ESP_LOGI(TAG, "Serve %s", req->uri);
-    if (startsWith(req->uri, "/set-wifi/")) {
+    if (startsWith(req->uri, "/favicon.ico")) {
+      httpd_resp_set_status(req, "404 Not found");
+      httpd_resp_send(req, "404 Not found", HTTPD_RESP_USE_STRLEN);
+    } else if (startsWith(req->uri, "/set-wifi/")) {
       char input_param[sizeof(req->uri)];
       strncpy(input_param, req->uri + 10, sizeof(req->uri));
       strtok(input_param, "-");
@@ -360,11 +372,22 @@ class ConfigPortal : public HttpGetHandler {
       if (strlen((const char *)sta.ssid) && in_pwd && strlen((const char *)sta.password) && in_mqtt && strlen(mqtt_server)) {
         done = true;
       }
+    } else if (startsWith(req->uri, "/unpair/")) {
+      int idx = atoi(req->uri + 8);
+      if (idx >=0 && idx < MAX_DEVICES) {
+        unpairDevice(idx);
+        httpd_resp_set_status(req, "302 Temporary Redirect");
+        // Redirect to the "/" anyGet directory
+        httpd_resp_set_hdr(req, "Location", "/");
+        // iOS requires content in the response to detect a captive portal, simply redirecting is not sufficient.
+        httpd_resp_send(req, "Redirect", HTTPD_RESP_USE_STRLEN);
+      }
     }
 
     // Send back the current status
     httpd_resp_set_type(req, "text/html");
 
+    auto now = esp_log_timestamp();
     std::stringstream html;
     html << "<!DOCTYPE html>"
             "<html>"
@@ -372,10 +395,29 @@ class ConfigPortal : public HttpGetHandler {
             "<meta charset=\"UTF-8\">"
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
             "<title>FreeHouse-HUB</title>"
-            "<style>button { display: block; margin: 0.5em; }</style>"
+            "<style>* { font-family: sans-serif; } button { display: block; margin: 0.5em; }</style>"
             "</head>"
             "<body>"
             "<h1>FreeHouse-HUB</h1>"
+            "<h2>Devcies</h1>"
+            "<table>"
+            "<tr><th>Name</th><th>Last seen</th><th>Rssi</th><th>Unpair</th></tr>";
+
+    for (int i = 0; i < MAX_DEVICES; i++) {
+      if (device[i].name[0]) {
+        // char mac[20];
+        // sprintf(mac, MACSTR, MAC2STR(device[i].mac));
+        html << "<tr>"
+          "<td>" << device[i].name << "</td>"
+          "<td>" << (signed)(now - device[i].lastSeen) << "</td>"
+          "<td>" << device[i].peerRssi << "</td>"
+          "<td><button onclick='window.location.href = \"/unpair/" << i << "\"'>&#128465;</button></td>"
+          "</tr>";
+      }
+    }
+
+    html << "</table>"
+            "<h2>Config</h1>"
             "<table>"
             "<tr><td>WiFi SSID</td><td><input id='ssid' value='" << sta.ssid << "'></td></tr>"
             "<tr><td>WiFi password</td><td><input id='pwd' value='" << sta.password << "'></td></tr>"
@@ -433,6 +475,7 @@ extern "C" void app_main(void) {
     wifi_config.sta.password[sizeof(wifi_config.sta.password) - 1] = 0;
 
     auto portal = new ConfigPortal(wifi_config.sta, mqtt_uri);
+    start_captive_portal(portal, "FreeHouse-HUB");
 
     bool led = true;
     while (true) {
@@ -464,6 +507,7 @@ extern "C" void app_main(void) {
   nvs_close(nvs_handle);
 
   esp_netif_t *netif = esp_netif_create_default_wifi_sta();  // Create default STA interface
+  esp_netif_set_hostname(netif, "FreeHouse-HUB");  // Set hostname for the STA interface
 
   wifi_event_group = xEventGroupCreate();
 
@@ -533,6 +577,10 @@ extern "C" void app_main(void) {
   esp_mqtt_client_register_event(mqtt_client, (esp_mqtt_event_id_t)ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
   esp_mqtt_client_start(mqtt_client);
 
+  // Normal mode - no captive portal
+  auto portal = new ConfigPortal(wifi_config.sta, mqtt_uri);
+  start_web_server(portal);
+
   int pressed = 0;
   // LED off: running
   GPIO::digitalWrite(IO_LED_G, 0);
@@ -557,14 +605,11 @@ extern "C" void app_main(void) {
       vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
 
-    auto now = esp_log_early_timestamp();
+    auto now = esp_log_timestamp();
     for (int i = 0; i < MAX_DEVICES; i++) {
       if (device[i].name[0] && (signed)(now - device[i].lastSeen) > DEVICE_TIMEOUT) {
         ESP_LOGI(TAG, "Device %s timed out", device[i].name);
-        memset(device[i].name, 0, sizeof(device[i].name));
-        memset(device[i].mac, 0, sizeof(device[i].mac));
-        if (device[i].info) free(device[i].info);
-        device[i].info = NULL;
+        unpairDevice(i);
       }
     }
   }

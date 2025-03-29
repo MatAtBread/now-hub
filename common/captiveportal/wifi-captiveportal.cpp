@@ -115,81 +115,64 @@ esp_err_t http_404_error_handler(httpd_req_t *req, httpd_err_code_t err)
     return ESP_OK;
 }
 
-// static httpd_handle_t start_webserver(HttpGetHandler *handler)
-// {
-//     httpd_handle_t server = NULL;
-//     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-//     config.max_open_sockets = 13;
-//     config.lru_purge_enable = true;
-//     config.uri_match_fn = httpd_uri_match_wildcard;
-//     // Start the httpd server
-//     ESP_LOGI(TAG, "Starting server on port: '%d'", config.server_port);
-//     if (httpd_start(&server, &config) == ESP_OK) {
-//         // Set URI handlers
-//         ESP_LOGI(TAG, "Registering URI handlers");
-//         //handle = handler;
-//         static const httpd_uri_t anyGet = {
-//             .uri = "*",
-//             .method = HTTP_GET,
-//             .handler = bind(handler, &HttpGetHandler::getHandler)
-//         };
-//         httpd_register_uri_handler(server, &anyGet);
-//         httpd_register_err_handler(server, HTTPD_404_NOT_FOUND, http_404_error_handler);
-//     }
-//     return server;
-// }
-
 static HttpGetHandler *handler;
 static esp_err_t getHandler(httpd_req_t *req) {
     return handler->getHandler(req);
 }
 
-void start_captive_portal(HttpGetHandler *_handler, const char *ssid)
-{
-    handler = _handler;
-    /*
-        Turn of warnings from HTTP server as redirecting traffic will yield
-        lots of invalid requests
-    */
-    esp_log_level_set("httpd_uri", ESP_LOG_WARN);
-    esp_log_level_set("httpd_txrx", ESP_LOG_WARN);
-    esp_log_level_set("httpd_parse", ESP_LOG_WARN);
+void start_web_server(HttpGetHandler *_handler) {
+  if (handler) {
+    ESP_LOGI(TAG, "Web server already started");
+    return;
+  }
+  handler = _handler;
 
-    // Initialize Wi-Fi including netif with default config
-    esp_netif_create_default_wifi_ap();
+  httpd_handle_t server = NULL;
+  httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+  config.max_open_sockets = 13;
+  config.lru_purge_enable = true;
+  config.uri_match_fn = httpd_uri_match_wildcard;
 
-    // Initialise ESP32 in SoftAP mode
-    wifi_init_softap(ssid);
+  // Start the httpd server
+  ESP_LOGI(TAG, "Starting server on port: '%d'", config.server_port);
+  if (httpd_start(&server, &config) == ESP_OK) {
+    // Set URI handlers
+    ESP_LOGI(TAG, "Registering URI handlers");
+    // handle = handler;
+    static const httpd_uri_t anyGet = {
+        .uri = "*",
+        .method = HTTP_GET,
+        .handler = getHandler};
 
-    // Configure DNS-based captive portal, if configured
-    #ifdef CONFIG_ESP_ENABLE_DHCP_CAPTIVEPORTAL
-        dhcp_set_captiveportal_url();
-    #endif
+    httpd_register_uri_handler(server, &anyGet);
+    httpd_register_err_handler(server, HTTPD_404_NOT_FOUND, http_404_error_handler);
+  }
+}
 
-    // Start the http server
-        httpd_handle_t server = NULL;
-        httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-        config.max_open_sockets = 13;
-        config.lru_purge_enable = true;
-        config.uri_match_fn = httpd_uri_match_wildcard;
+void start_captive_portal(HttpGetHandler *_handler, const char *ssid) {
+  /*
+      Turn of warnings from HTTP server as redirecting traffic will yield
+      lots of invalid requests
+  */
+  esp_log_level_set("httpd_uri", ESP_LOG_WARN);
+  esp_log_level_set("httpd_txrx", ESP_LOG_WARN);
+  esp_log_level_set("httpd_parse", ESP_LOG_WARN);
 
-        // Start the httpd server
-        ESP_LOGI(TAG, "Starting server on port: '%d'", config.server_port);
-        if (httpd_start(&server, &config) == ESP_OK) {
-            // Set URI handlers
-            ESP_LOGI(TAG, "Registering URI handlers");
-            //handle = handler;
-            static const httpd_uri_t anyGet = {
-                .uri = "*",
-                .method = HTTP_GET,
-                .handler = getHandler
-            };
+  // Initialize Wi-Fi including netif with default config
+  esp_netif_create_default_wifi_ap();
 
-            httpd_register_uri_handler(server, &anyGet);
-            httpd_register_err_handler(server, HTTPD_404_NOT_FOUND, http_404_error_handler);
-        }
+  // Initialise ESP32 in SoftAP mode
+  wifi_init_softap(ssid);
 
-    // Start the DNS server that will redirect all queries to the softAP IP
-    dns_server_config_t dns_config = DNS_SERVER_CONFIG_SINGLE("*" /* all A queries */, "WIFI_AP_DEF" /* softAP netif ID */);
-    start_dns_server(&dns_config);
+// Configure DNS-based captive portal, if configured
+#ifdef CONFIG_ESP_ENABLE_DHCP_CAPTIVEPORTAL
+  dhcp_set_captiveportal_url();
+#endif
+
+  // Start the http server
+  start_web_server(_handler);
+
+  // Start the DNS server that will redirect all queries to the softAP IP
+  dns_server_config_t dns_config = DNS_SERVER_CONFIG_SINGLE("*" /* all A queries */, "WIFI_AP_DEF" /* softAP netif ID */);
+  start_dns_server(&dns_config);
 }

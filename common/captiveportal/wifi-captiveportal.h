@@ -9,4 +9,5 @@ class HttpGetHandler {
 };
 
 void start_captive_portal(HttpGetHandler *handler, const char *ssid);
+void start_web_server(HttpGetHandler *_handler);
 #endif
