@@ -10,6 +10,7 @@
 #include "esp_wifi.h"
 #include "mqtt_client.h"
 #include "nvs_flash.h"
+#include "cJSON.h"
 
 // These should be configurable
 const char *MQTT_TOPIC = "FreeHouse";
@@ -36,7 +37,7 @@ ESP-NOW messages are strings:
 
 MQTT topics:
     FreeHouse/NAME          The state of the device: a message forwarded by the hub from the esp-now device to the MQTT broker (ie hub RX, )
-    FreeHouse/NAME/set      Data message sent by other devices to the hub, destined for the esp-now device with the specified NAME
+    FreeHouse/NAME/set      Data message sent by other devices to the hub, destined for the esp-now device with the specified NAME. Note: multiple messages are shallow merged until they are delivered.
     FreeHouse               Hub status
 */
 
@@ -118,6 +119,41 @@ static char *bufAs0TermString(const void *s, size_t n) {
   return d;
 }
 
+cJSON *shallow_merge(const char *dest_json_str, const char *src_json_str) {
+  // Parse destination and source JSON strings
+  cJSON *dest = cJSON_Parse(dest_json_str);
+  cJSON *src = cJSON_Parse(src_json_str);
+
+  if (!dest || !src) {
+      printf("Error parsing JSON strings.\n");
+      if (dest) cJSON_Delete(dest);
+      if (src) cJSON_Delete(src);
+      return NULL;
+  }
+
+  // Iterate through keys in the source object
+  cJSON *src_item = src->child;
+  while (src_item) {
+      // Find the corresponding key in the destination object
+      cJSON *dest_item = cJSON_GetObjectItem(dest, src_item->string);
+
+      if (dest_item) {
+          // Replace value in destination with value from source (shallow update)
+          cJSON_ReplaceItemInObject(dest, src_item->string, cJSON_Duplicate(src_item, 0));
+      } else {
+          // Add new key-value pair to destination
+          cJSON_AddItemToObject(dest, src_item->string, cJSON_Duplicate(src_item, 0));
+      }
+
+      src_item = src_item->next; // Move to next key in source
+  }
+
+  // Cleanup source object
+  cJSON_Delete(src);
+
+  return dest; // Return merged JSON object
+}
+
 static void mqtt_event_handler(void *args, esp_event_base_t base,
                                int32_t event_id, void *event_data) {
   esp_mqtt_event_handle_t event = (esp_mqtt_event_handle_t)event_data;
@@ -156,10 +192,22 @@ static void mqtt_event_handler(void *args, esp_event_base_t base,
         auto target = device[deviceIndex].mac;
         auto str = bufAs0TermString(event->data, event->data_len);
         if (device[deviceIndex].pending.length()) {
-          // TODO: Merge pending messages
+          // Merge pending messages
+          auto merged = shallow_merge(device[deviceIndex].pending.c_str(), str);
+          if (merged) {
+            // Print merged JSON string
+            char *merged_json_str = cJSON_Print(merged);
+            device[deviceIndex].pending = merged_json_str;
+            free(merged_json_str);
+            // Free memory
+            cJSON_Delete(merged);
+          } else {
+            device[deviceIndex].pending = str;
+          }
+        } else {
+          device[deviceIndex].pending = str;
         }
-        device[deviceIndex].pending = str;
-        esp_now_send(target, (uint8_t *)str, event->data_len + 1);
+        esp_now_send(target, (uint8_t *)str, strlen(str) + 1);
         free(str);
       }
       free(topic);
@@ -409,7 +457,7 @@ class ConfigPortal : public HttpGetHandler {
         // sprintf(mac, MACSTR, MAC2STR(device[i].mac));
         html << "<tr>"
           "<td>" << device[i].name << "</td>"
-          "<td>" << (signed)(now - device[i].lastSeen) << "</td>"
+          "<td><script>document.currentScript.replaceWith(new Date(Date.now()-" << (signed)(now - device[i].lastSeen) << ").toLocaleString())</script></td>"
           "<td>" << device[i].peerRssi << "</td>"
           "<td><button onclick='window.location.href = \"/unpair/" << i << "\"'>&#128465;</button></td>"
           "</tr>";
