@@ -14,7 +14,14 @@ static PinMode lastMode[GPIO_NUM_MAX];
 static bool lastWrite[GPIO_NUM_MAX];
 
 void GPIO::pinMode(int pin, PinMode mode) {
-  gpio_reset_pin((gpio_num_t)pin);
+  gpio_config_t cfg = {
+    .pin_bit_mask = 1ULL << pin,
+    .mode = mode == INPUT ? GPIO_MODE_INPUT : GPIO_MODE_OUTPUT, // Also, OD variants
+    .pull_up_en = GPIO_PULLUP_DISABLE,
+    .pull_down_en = GPIO_PULLDOWN_DISABLE,
+    .intr_type = GPIO_INTR_DISABLE
+  };
+  gpio_config(&cfg);
   lastMode[pin] = mode;
   gpio_set_direction((gpio_num_t)pin, (gpio_mode_t)mode);
 }
