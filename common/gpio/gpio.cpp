@@ -39,20 +39,22 @@ bool GPIO::digitalRead(int pin) {
   }
 }
 
-int GPIO::analogRead(int pin, adc_atten_t atten, bool calibrated) {
-  adc_oneshot_unit_handle_t adc_handle;
-  adc_oneshot_unit_init_cfg_t unit_config = { ADC_UNIT_1, ADC_DIGI_CLK_SRC_DEFAULT, ADC_ULP_MODE_DISABLE };
+// The ESP-IDF adc stack is thread safe, but not re-entrant, so we only initialise this once
+static adc_oneshot_unit_handle_t adc_handle = NULL;
 
-  if (ESP_ERROR_CHECK_WITHOUT_ABORT(adc_oneshot_new_unit(&unit_config, &adc_handle)) != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to create ADC unit for pin %d", pin);
-    return -1;
+int GPIO::analogRead(int pin, adc_atten_t atten, bool calibrated) {
+  if (!adc_handle) {
+    adc_oneshot_unit_init_cfg_t unit_config = { ADC_UNIT_1, ADC_DIGI_CLK_SRC_DEFAULT, ADC_ULP_MODE_DISABLE };
+    if (ESP_ERROR_CHECK_WITHOUT_ABORT(adc_oneshot_new_unit(&unit_config, &adc_handle)) != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to create ADC unit for pin %d", pin);
+      return -1;
+    }
   }
 
   adc_oneshot_chan_cfg_t config = {
     .atten = atten, // = approx 400mv -> 3800mv. Note: battery is divided by 2 in hardware
     .bitwidth = ADC_BITWIDTH_12,
   };
-
   ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle, (adc_channel_t)pin, &config));
 
   adc_cali_handle_t adc1_cali_chan_handle = NULL;
@@ -72,7 +74,7 @@ int GPIO::analogRead(int pin, adc_atten_t atten, bool calibrated) {
     adc_calibration_deinit(adc1_cali_chan_handle);
     adc_reading = voltage;
   }
-  ESP_ERROR_CHECK(adc_oneshot_del_unit(adc_handle));
+  // ESP_ERROR_CHECK(adc_oneshot_del_unit(adc_handle));
   return adc_reading;
 }
 
