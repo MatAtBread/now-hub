@@ -243,7 +243,7 @@ static void sendNACK(const uint8_t *mac_addr) {
 static void espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status) {
   const auto idx = findDeviceMac(mac_addr);
   if (status != ESP_OK) {
-    ESP_LOGI(TAG, "Send to " MACSTR " (device %d) failed", MAC2STR(mac_addr), idx);
+    ESP_LOGI(TAG, "Send to " MACSTR " (device %d %s) failed", MAC2STR(mac_addr), idx, idx >= 0 ? device[idx].name : "?");
   } else {
     if (idx >= 0) {
       if (device[idx].pending.length()) {
@@ -396,10 +396,9 @@ class ConfigPortal : public HttpGetHandler {
   wifi_sta_config_t &sta;
   char *mqtt_server;
   bool done;
-  bool cancelled;
 
   ConfigPortal(wifi_sta_config_t &sta, char *mqtt_server) : sta(sta), mqtt_server(mqtt_server) {
-    done = cancelled = false;
+    done = false;
   }
 
   esp_err_t getHandler(httpd_req_t *req) {
@@ -407,6 +406,8 @@ class ConfigPortal : public HttpGetHandler {
     if (startsWith(req->uri, "/favicon.ico")) {
       httpd_resp_set_status(req, "404 Not found");
       httpd_resp_send(req, "404 Not found", HTTPD_RESP_USE_STRLEN);
+    } else if (startsWith(req->uri, "/close")) {
+      done = true;
     } else if (startsWith(req->uri, "/set-wifi/")) {
       char input_param[sizeof(req->uri)];
       strncpy(input_param, req->uri + 10, sizeof(req->uri));
@@ -418,6 +419,14 @@ class ConfigPortal : public HttpGetHandler {
       if (in_pwd) unencode((char *)sta.password, in_pwd, sizeof(sta.password));
       if (in_mqtt) unencode(mqtt_server, in_mqtt, 64);
       if (strlen((const char *)sta.ssid) && in_pwd && strlen((const char *)sta.password) && in_mqtt && strlen(mqtt_server)) {
+        nvs_handle_t nvs_handle;
+        if (nvs_open("storage", NVS_READWRITE, &nvs_handle) == ESP_OK) {
+          ESP_LOGI(TAG, "Confirmed config ssid %s mqtt %s", sta.ssid, mqtt_server);
+          nvs_set_str(nvs_handle, "ssid", (const char *)sta.ssid);
+          nvs_set_str(nvs_handle, "wifipwd", (const char *)sta.password);
+          nvs_set_str(nvs_handle, "mqtt", mqtt_server);
+          nvs_close(nvs_handle);
+        }
         done = true;
       }
     } else if (startsWith(req->uri, "/unpair/")) {
@@ -471,7 +480,7 @@ class ConfigPortal : public HttpGetHandler {
             "<tr><td>WiFi password</td><td><input id='pwd' value='" << sta.password << "'></td></tr>"
             "<tr><td>MQTT server</td><td><input id='mqtt' value='" << mqtt_server << "'></td></tr>"
             "</table>"
-            "<button onclick='window.location.href = \"/set-wifi/\"+encodeURIComponent(\"ssid,pwd,mqtt\".split(\",\").map(id => document.getElementById(id).value).join(\"-\"))'>Set</button>"
+            "<button onclick='window.location.href = \"/set-wifi/\"+encodeURIComponent(\"ssid,pwd,mqtt\".split(\",\").map(id => document.getElementById(id).value).join(\"-\"))'>Save</button>"
             "<button onclick='window.location.href = \"/close/\"'>Close</button>"
             "</body></html>";
 
@@ -509,13 +518,13 @@ extern "C" void app_main(void) {
       }};
   size_t len;
 
-  nvs_handle_t nvs_handle;
-  char mqtt_uri[64];
+  nvs_handle_t nvs_handle = -1;
+  char mqtt_uri[64] = {0};
   if (nvs_open("storage", NVS_READWRITE, &nvs_handle) != ESP_OK
-  || ((len = sizeof(wifi_config.sta.ssid)), (nvs_get_str(nvs_handle, "ssid", (char *)wifi_config.sta.ssid, &len) != ESP_OK))
-  || ((len = sizeof(wifi_config.sta.password)), (nvs_get_str(nvs_handle, "wifipwd", (char *)wifi_config.sta.password, &len) != ESP_OK))
-  || ((len = sizeof(mqtt_uri)), (nvs_get_str(nvs_handle, "mqtt", mqtt_uri, &len) != ESP_OK))
-    ) {
+    || ((len = sizeof(wifi_config.sta.ssid)), (nvs_get_str(nvs_handle, "ssid", (char *)wifi_config.sta.ssid, &len) != ESP_OK))
+    || ((len = sizeof(wifi_config.sta.password)), (nvs_get_str(nvs_handle, "wifipwd", (char *)wifi_config.sta.password, &len) != ESP_OK))
+    || ((len = sizeof(mqtt_uri)), (nvs_get_str(nvs_handle, "mqtt", mqtt_uri, &len) != ESP_OK))) {
+    if (nvs_handle != -1) nvs_close(nvs_handle);
     ESP_LOGI(TAG, "No wifi credentials found");
     // Start captive portal which sets nvs keys
     mqtt_uri[sizeof(mqtt_uri) - 1] = 0;
@@ -535,27 +544,17 @@ extern "C" void app_main(void) {
 
       vTaskDelay(1000 / portTICK_PERIOD_MS);
       if (portal->done) {
-        ESP_LOGI(TAG, "Confirmed config ssid %s (%s), mqtt %s (%s)", portal->sta.ssid, wifi_config.sta.ssid, portal->mqtt_server, mqtt_uri);
-        nvs_set_str(nvs_handle, "ssid", (const char *)portal->sta.ssid);
-        nvs_set_str(nvs_handle, "wifipwd", (const char *)portal->sta.password);
-        nvs_set_str(nvs_handle, "mqtt", portal->mqtt_server);
-        nvs_close(nvs_handle);
-        GPIO::digitalWrite(IO_LED_B, 0);
-        GPIO::digitalWrite(IO_LED_R, 0);
-        esp_restart();
-      }
-      if (portal->cancelled) {
-        nvs_close(nvs_handle);
         GPIO::digitalWrite(IO_LED_B, 0);
         GPIO::digitalWrite(IO_LED_R, 0);
         esp_restart();
       }
     }
   }
-  nvs_close(nvs_handle);
+
+  if (nvs_handle != -1) nvs_close(nvs_handle);
 
   esp_netif_t *netif = esp_netif_create_default_wifi_sta();  // Create default STA interface
-  esp_netif_set_hostname(netif, "FreeHouse-HUB");  // Set hostname for the STA interface
+  esp_netif_set_hostname(netif, "freehouse-hub");  // Set hostname for the STA interface
 
   wifi_event_group = xEventGroupCreate();
 
