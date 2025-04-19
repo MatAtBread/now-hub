@@ -26,7 +26,7 @@
 #define QD_TYPE_A (0x0001)
 #define ANS_TTL_SEC (300)
 
-static const char *TAG = "TRV/DNS";
+extern const char *TAG;
 // DNS Header Packet
 typedef struct __attribute__((__packed__)) {
   uint16_t id;

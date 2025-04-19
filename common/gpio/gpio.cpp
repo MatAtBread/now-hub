@@ -5,7 +5,7 @@
 
 #include "gpio.hpp"
 
-extern const char* TAG;
+extern "C" const char* TAG;
 
 static void adc_calibration_deinit(adc_cali_handle_t handle);
 static bool adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_atten_t atten, adc_cali_handle_t *out_handle);
@@ -55,6 +55,7 @@ int GPIO::analogRead(int pin, adc_atten_t atten, bool calibrated) {
     .atten = atten, // = approx 400mv -> 3800mv. Note: battery is divided by 2 in hardware
     .bitwidth = ADC_BITWIDTH_12,
   };
+  // ESP_LOGI(TAG, "adc_oneshot_config_channel channel %d, atten %d", pin, atten);
   ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle, (adc_channel_t)pin, &config));
 
   adc_cali_handle_t adc1_cali_chan_handle = NULL;

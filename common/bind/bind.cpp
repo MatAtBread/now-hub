@@ -8,7 +8,7 @@
 #include "freertos/FreeRTOS.h"
 
 #define CONFIG_MAX_BOUND_METHODS 64 /* Allow for 64 bound functions */
-static const char *TAG = "C++ bind";
+extern "C" const char *TAG;
 
 #define CUSTOM_HEAP_SIZE 8 * CONFIG_MAX_BOUND_METHODS
 static uint32_t IRAM_ATTR boundPreambles[CUSTOM_HEAP_SIZE];

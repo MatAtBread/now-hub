@@ -20,15 +20,14 @@
 
 #include "esp_http_server.h"
 #include "dns_server.h"
+#include "ota.h"
 
 #include "wifi-captiveportal.h"
 
 #undef CONFIG_ESP_ENABLE_DHCP_CAPTIVEPORTAL
 #define EXAMPLE_MAX_STA_CONN 4
 
-//#define ESP_NETIF_CAPTIVEPORTAL_URI 114 // Missing in v5.3.2/esp-idf/components/esp_netif/include/esp_netif_types.h
-
-static const char* TAG = "wifi-captiveportal";
+extern "C" const char *TAG;
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data)
@@ -139,10 +138,18 @@ void start_web_server(HttpGetHandler *_handler) {
     // Set URI handlers
     ESP_LOGI(TAG, "Registering URI handlers");
     // handle = handler;
+    static const httpd_uri_t ota_uri = {
+      .uri       = "/ota",
+      .method    = HTTP_POST,
+      .handler   = ota_post_handler,
+      .user_ctx  = NULL
+    };
+    httpd_register_uri_handler(server, &ota_uri);
     static const httpd_uri_t anyGet = {
-        .uri = "*",
-        .method = HTTP_GET,
-        .handler = getHandler};
+      .uri = "*",
+      .method = HTTP_GET,
+      .handler = getHandler
+    };
 
     httpd_register_uri_handler(server, &anyGet);
     httpd_register_err_handler(server, HTTPD_404_NOT_FOUND, http_404_error_handler);
