@@ -7,6 +7,7 @@
 #include "../common/gpio/gpio.hpp"
 #include "esp_log.h"
 #include "esp_now.h"
+#include "esp_mac.h"
 #include "esp_wifi.h"
 #include "mqtt_client.h"
 #include "nvs_flash.h"
@@ -60,7 +61,9 @@ static device_t device[MAX_DEVICES];
 static MACAddr noDevice = {0, 0, 0, 0, 0, 0};
 
 static esp_mqtt_client_handle_t mqtt_client;
-static uint8_t gateway_mac[6];
+static uint8_t gateway_mac[6] = {0};
+static char hub_ip[16] = {0};
+static char hostname[32] = {0};
 
 static int findDeviceMac(const uint8_t *mac) {
   for (int i = 0; i < MAX_DEVICES; i++) {
@@ -87,6 +90,7 @@ static std::string deviceJson(const device_t &dev, const char *payload = NULL) {
   sprintf(mac, MACSTR, MAC2STR(dev.mac));
   s << "{"
     "\"name\":\"" << dev.name << "\","
+    "\"hub\":\"" << hub_ip << "\","
     "\"mac\":\"" << mac << "\","
     "\"rssi\":" << dev.peerRssi << ","
     "\"info\":" << (char *)(dev.info ? dev.info : "null") << ","
@@ -451,7 +455,7 @@ class ConfigPortal : public HttpGetHandler {
             "<head>"
             "<meta charset=\"UTF-8\">"
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-            "<title>FreeHouse-HUB</title>"
+            "<title>" << hostname << "</title>"
             "<style>* { font-family: sans-serif; } button { display: block; margin: 0.5em; }</style>"
             "<script>"
             "const ota_upload = async () => {"
@@ -471,7 +475,7 @@ class ConfigPortal : public HttpGetHandler {
           "</script>"
                   "</head>"
             "<body>"
-            "<h1>FreeHouse-HUB</h1>"
+            "<h1>" << hostname << " (" << hub_ip << ")</h1>"
             "<h2>Devcies</h1>"
             "<table>"
             "<tr><th>Name</th><th>Last seen</th><th>Rssi</th><th>Unpair</th></tr>";
@@ -575,8 +579,15 @@ extern "C" void app_main(void) {
 
   if (nvs_handle != -1) nvs_close(nvs_handle);
 
+  esp_read_mac(gateway_mac, ESP_MAC_WIFI_STA);
+
   esp_netif_t *netif = esp_netif_create_default_wifi_sta();  // Create default STA interface
-  esp_netif_set_hostname(netif, "freehouse-hub");  // Set hostname for the STA interface
+  unsigned int mac_hash = 0;
+  for (int i = 0; i < sizeof(gateway_mac); i++) {
+    mac_hash += gateway_mac[i];
+  }
+  snprintf(hostname, sizeof(hostname), "freehouse-hub-%03u", mac_hash % 1000);
+  esp_netif_set_hostname(netif, hostname);  // Set hostname for the STA interface
 
   wifi_event_group = xEventGroupCreate();
 
@@ -615,20 +626,20 @@ extern "C" void app_main(void) {
     return;
   }
 
+  esp_netif_ip_info_t ip_info;
+  ESP_ERROR_CHECK_WITHOUT_ABORT(esp_netif_get_ip_info(netif, &ip_info));
+  snprintf(hub_ip, sizeof(hub_ip), IPSTR, IP2STR(&ip_info.ip));
+
   // Green LED - connected
   GPIO::digitalWrite(IO_LED_R, 0);
   GPIO::digitalWrite(IO_LED_G, 1);
   ESP_LOGI(TAG,
-           "WiFi connected %s: Primary channel: %d, Secondary channel: %d, MAC %02x:%02x:%02x:%02x:%02x:%02x",
+           "WiFi connected %s: Primary channel: %d, Secondary channel: %d, IP %s, MAC " MACSTR,
            wifi_config.sta.ssid,
            primary_channel,
            secondary_channel,
-           gateway_mac[0],
-           gateway_mac[1],
-           gateway_mac[2],
-           gateway_mac[3],
-           gateway_mac[4],
-           gateway_mac[5]);
+           hub_ip,
+           MAC2STR(gateway_mac));
 
   // Initialize ESP-NOW
   ESP_ERROR_CHECK(esp_now_init());
