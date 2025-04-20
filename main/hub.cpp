@@ -13,6 +13,8 @@
 #include "nvs_flash.h"
 #include "cJSON.h"
 
+#define MULTILINE_STRING(...) #__VA_ARGS__
+
 // These should be configurable
 const char *MQTT_TOPIC = "FreeHouse";
 #define IO_LED_R 3
@@ -458,21 +460,49 @@ class ConfigPortal : public HttpGetHandler {
             "<title>" << hostname << "</title>"
             "<style>* { font-family: sans-serif; } button { display: block; margin: 0.5em; }</style>"
             "<script>"
-            "const ota_upload = async () => {"
-              "const input = document.getElementById('firmware');"
-              "if (!input.files.length || !(input.files[0] instanceof Blob)) {"
-                "alert('Please select a file.');"
-              "} else {"
-                "const file = input.files[0];"
-                "let response; try { response = await fetch('/ota', { method: 'POST', body: file }) } catch (ex) { alert('Upload error\\n\\n' + ex.message) }"
-                "if (response?.ok) {"
-                  "alert('Upload successful!');"
-                "} else {"
-                  "alert('Upload failed.');"
-                "}"
-              "}"
-            "}"
-          "</script>"
+
+            MULTILINE_STRING(
+            function ota_upload(elt) {
+              elt.disabled = true;
+              const input = document.getElementById('firmware');
+              if (!input.files.length || !(input.files[0] instanceof Blob)) {
+                alert('Please select a file.');
+                return;
+              }
+
+              const file = input.files[0];
+              const xhr = new XMLHttpRequest();
+
+              // Optional: Show progress in the console; replace with UI update as needed
+              xhr.upload.onprogress = function(event) {
+                if (event.lengthComputable) {
+                  const percentComplete = (event.loaded / event.total) * 100;
+                  elt.textContent = (`${percentComplete.toFixed(2)}% complete`);
+                } else {
+                  elt.textContent = (`Uploaded ${event.loaded} bytes`);
+                }
+              };
+
+              xhr.onload = function() {
+                if (xhr.status === 200) {
+                  alert('Upload successful!');
+                } else {
+                  alert('Upload failed.');
+                }
+                elt.disabled = false;
+              };
+
+              xhr.onerror = function() {
+                alert('Upload error\n\n' + xhr.statusText);
+                elt.disabled = false;
+              };
+
+              xhr.open('POST', '/ota', true);
+              xhr.send(file);
+            }
+            )
+
+            "</script>"
                   "</head>"
             "<body>"
             "<h1>" << hostname << " (" << hub_ip << ")</h1>"
@@ -505,7 +535,7 @@ class ConfigPortal : public HttpGetHandler {
             "<h2>OTA Update</h2>"
             "<div>"
             "  <input type='file' id='firmware'>"
-            "  <button onclick='this.disabled = true; ota_upload()'>Update</button>"
+            "  <button onclick='ota_upload(this)'>Update</button>"
             "</div>"
             "<div>Current: " __DATE__ " " __TIME__ "</div>"
             "</body></html>";
