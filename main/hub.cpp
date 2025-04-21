@@ -17,6 +17,7 @@
 
 // These should be configurable
 const char *MQTT_TOPIC = "FreeHouse";
+#define OTA_ROOT_URI "http://files.mailed.me.uk/public/freehouse/"
 #define IO_LED_R 3
 #define IO_LED_G 4
 #define IO_LED_B 5
@@ -66,6 +67,13 @@ static esp_mqtt_client_handle_t mqtt_client;
 static uint8_t gateway_mac[6] = {0};
 static char hub_ip[16] = {0};
 static char hostname[32] = {0};
+static wifi_config_t wifi_config = {
+  .sta = {
+      .ssid = "",
+      .password = "",
+      .threshold = {.authmode = WIFI_AUTH_WPA2_PSK},
+  }
+};
 
 static int findDeviceMac(const uint8_t *mac) {
   for (int i = 0; i < MAX_DEVICES; i++) {
@@ -84,6 +92,19 @@ static int findDeviceName(const char *name) {
     }
   }
   return -1;
+}
+
+void unpairDevice(int i) {
+  ESP_LOGI(TAG, "Unpair device %s (%d)", device[i].name, i);
+
+  memset(device[i].name, 0, sizeof(device[i].name));
+  memset(device[i].mac, 0, sizeof(device[i].mac));
+  device[i].pending = "";
+  device[i].lastSeen = 0;
+  device[i].peerRssi = 0;
+
+  if (device[i].info) free(device[i].info);
+  device[i].info = NULL;
 }
 
 static std::string deviceJson(const device_t &dev, const char *payload = NULL) {
@@ -145,10 +166,10 @@ cJSON *shallow_merge(const char *dest_json_str, const char *src_json_str) {
 
       if (dest_item) {
           // Replace value in destination with value from source (shallow update)
-          cJSON_ReplaceItemInObject(dest, src_item->string, cJSON_Duplicate(src_item, 0));
+          cJSON_ReplaceItemInObject(dest, src_item->string, cJSON_Duplicate(src_item, 1));
       } else {
           // Add new key-value pair to destination
-          cJSON_AddItemToObject(dest, src_item->string, cJSON_Duplicate(src_item, 0));
+          cJSON_AddItemToObject(dest, src_item->string, cJSON_Duplicate(src_item, 1));
       }
 
       src_item = src_item->next; // Move to next key in source
@@ -157,7 +178,47 @@ cJSON *shallow_merge(const char *dest_json_str, const char *src_json_str) {
   // Cleanup source object
   cJSON_Delete(src);
 
+  // ESP_LOGI(TAG, "Merged JSON: %s = %s + %s", cJSON_Print(dest), dest_json_str, src_json_str); // Print merged JSON for debugging
   return dest; // Return merged JSON object
+}
+
+static void mergeAndSendPending(int deviceIndex, const char *str) {
+  // Check if the device index is valid
+  if (deviceIndex < 0 || deviceIndex >= MAX_DEVICES) {
+    ESP_LOGE(TAG, "Invalid device index: %d", deviceIndex);
+    return;
+  }
+
+  if (!memcmp(noDevice, device[deviceIndex].mac, sizeof(noDevice))) {
+    ESP_LOGE(TAG, "Invalid device mac: %d", deviceIndex);
+    return;
+  }
+
+  // Check if the pending string is not empty
+  if (!str || strlen(str) == 0) {
+    ESP_LOGE(TAG, "Empty pending string");
+    return;
+  }
+
+  // Check if the device has a pending message
+  if (device[deviceIndex].pending.length()) {
+    // Merge pending messages
+    auto merged = shallow_merge(device[deviceIndex].pending.c_str(), str);
+    if (merged) {
+      // Print merged JSON string
+      char *merged_json_str = cJSON_Print(merged);
+      device[deviceIndex].pending = merged_json_str;
+      free(merged_json_str);
+      // Free memory
+      cJSON_Delete(merged);
+    } else {
+      device[deviceIndex].pending = str;
+    }
+  } else {
+    device[deviceIndex].pending = str;
+  }
+//  esp_now_send(device[idx].mac, (const uint8_t *)device[idx].pending.c_str(), device[idx].pending.length() + 1);
+  esp_now_send(device[deviceIndex].mac, (const uint8_t *)device[deviceIndex].pending.c_str(), device[deviceIndex].pending.length() + 1);
 }
 
 static void mqtt_event_handler(void *args, esp_event_base_t base,
@@ -195,25 +256,8 @@ static void mqtt_event_handler(void *args, esp_event_base_t base,
       if (event->data_len >= ESP_NOW_MAX_DATA_LEN_V2) {
         ESP_LOGI(TAG, "Too much data for esp-now v2: %s %s", name, event->data);
       } else {
-        auto target = device[deviceIndex].mac;
         auto str = bufAs0TermString(event->data, event->data_len);
-        if (device[deviceIndex].pending.length()) {
-          // Merge pending messages
-          auto merged = shallow_merge(device[deviceIndex].pending.c_str(), str);
-          if (merged) {
-            // Print merged JSON string
-            char *merged_json_str = cJSON_Print(merged);
-            device[deviceIndex].pending = merged_json_str;
-            free(merged_json_str);
-            // Free memory
-            cJSON_Delete(merged);
-          } else {
-            device[deviceIndex].pending = str;
-          }
-        } else {
-          device[deviceIndex].pending = str;
-        }
-        esp_now_send(target, (uint8_t *)str, strlen(str) + 1);
+        mergeAndSendPending(deviceIndex, str);
         free(str);
       }
       free(topic);
@@ -261,9 +305,10 @@ static void espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status
 }
 
 static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_t *data, int len) {
+  auto deviceIndex = findDeviceMac(esp_now_info->src_addr);
+
   if ((*(const uint32_t *)data) == PAIR[0]) {
     // This is a request to pair
-    auto deviceIndex = findDeviceMac(esp_now_info->src_addr);
     if (deviceIndex < 0) {
       for (int i = 0; i < MAX_DEVICES; i++) {
         if (!memcmp(noDevice, device[i].mac, sizeof(noDevice))) {
@@ -304,16 +349,18 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
       }
       esp_now_send(esp_now_info->src_addr, (const uint8_t *)PACK, sizeof(PACK));
       esp_mqtt_client_publish(mqtt_client, MQTT_TOPIC, hubStatusJson().c_str(), 0, 1, RETAIN);
-
-      if (device[deviceIndex].pending.length())
-        esp_now_send(device[deviceIndex].mac, (const uint8_t *)device[deviceIndex].pending.c_str(), device[deviceIndex].pending.length() + 1);
     } else {
       ESP_LOGE(TAG, "No device space for pairing %s " MACSTR, data + 4, MAC2STR(esp_now_info->src_addr));
       sendNACK(esp_now_info->src_addr);
     }
+  } else if ((*(const uint32_t *)data) == NACK[0]) {
+    if (deviceIndex >= 0) {
+      unpairDevice(deviceIndex);
+    } else {
+      ESP_LOGI(TAG, "NACK from unknown device " MACSTR, MAC2STR(esp_now_info->src_addr));
+    }
   } else if (*data == '{') {
     // Some JSON we need to forward to the MQTT broker
-    auto deviceIndex = findDeviceMac(esp_now_info->src_addr);
     if (deviceIndex >= 0) {
       device[deviceIndex].peerRssi = esp_now_info->rx_ctrl->rssi;
       device[deviceIndex].lastSeen = esp_log_timestamp();
@@ -329,15 +376,17 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
       // esp_mqtt_client_publish(mqtt_client, topic.c_str(), (const char *)data, len, 1, RETAIN);
       esp_mqtt_client_publish(mqtt_client, MQTT_TOPIC, hubStatusJson().c_str(), 0, 1, RETAIN);
 
-      if (device[deviceIndex].pending.length())
-        esp_now_send(device[deviceIndex].mac, (const uint8_t *)device[deviceIndex].pending.c_str(), device[deviceIndex].pending.length() + 1);
-
     } else {
       ESP_LOGI(TAG, "NACK data from unknown device " MACSTR " %.*s", MAC2STR(esp_now_info->src_addr), len, data);
       sendNACK(esp_now_info->src_addr);
     }
   } else {
     ESP_LOGI(TAG, "Unknown message from " MACSTR " %s", MAC2STR(esp_now_info->src_addr), data);
+  }
+
+  if (deviceIndex >= 0) {
+    if (device[deviceIndex].pending.length())
+      esp_now_send(device[deviceIndex].mac, (const uint8_t *)device[deviceIndex].pending.c_str(), device[deviceIndex].pending.length() + 1);
   }
 }
 
@@ -359,15 +408,6 @@ static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_
     ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
     xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
   }
-}
-
-void unpairDevice(int i) {
-  ESP_LOGI(TAG, "Unpair device %s (%d)", device[i].name, i);
-
-  memset(device[i].name, 0, sizeof(device[i].name));
-  memset(device[i].mac, 0, sizeof(device[i].mac));
-  if (device[i].info) free(device[i].info);
-  device[i].info = NULL;
 }
 
 class ConfigPortal : public HttpGetHandler {
@@ -445,6 +485,22 @@ class ConfigPortal : public HttpGetHandler {
         // iOS requires content in the response to detect a captive portal, simply redirecting is not sufficient.
         httpd_resp_send(req, "Redirect", HTTPD_RESP_USE_STRLEN);
       }
+    } else if (startsWith(req->uri, "/otaupdate/")) {
+      int idx = atoi(req->uri + 11);
+      if (idx >=0 && idx < MAX_DEVICES) {
+        std::string otaJson = "{\"ota\":{\"url\":\"" OTA_ROOT_URI "\",\"ssid\":\""
+              + std::string((const char *)sta.ssid)
+              + "\",\"pwd\":\""
+              + std::string((const char *)sta.password)
+              + "\"}}";
+        mergeAndSendPending(idx, otaJson.c_str());
+
+        httpd_resp_set_status(req, "302 Temporary Redirect");
+        // Redirect to the "/" anyGet directory
+        httpd_resp_set_hdr(req, "Location", "/");
+        // iOS requires content in the response to detect a captive portal, simply redirecting is not sufficient.
+        httpd_resp_send(req, "Redirect", HTTPD_RESP_USE_STRLEN);
+      }
     }
 
     // Send back the current status
@@ -484,16 +540,7 @@ class ConfigPortal : public HttpGetHandler {
               };
 
               xhr.onload = function() {
-                if (xhr.status === 200) {
-                  alert('Upload successful!');
-                } else {
-                  alert('Upload failed.');
-                }
-                elt.disabled = false;
-              };
-
-              xhr.onerror = function() {
-                alert('Upload error\n\n' + xhr.statusText);
+                elt.textContent = 'Upload\n\n' + xhr.statusText;
                 elt.disabled = false;
               };
 
@@ -508,7 +555,7 @@ class ConfigPortal : public HttpGetHandler {
             "<h1>" << hostname << " (" << hub_ip << ")</h1>"
             "<h2>Devcies</h1>"
             "<table>"
-            "<tr><th>Name</th><th>Last seen</th><th>Rssi</th><th>Unpair</th></tr>";
+            "<tr><th>Name</th><th>Last seen</th><th>Rssi</th><th>Unpair</th><th>OTA Update</th></tr>";
 
     for (int i = 0; i < MAX_DEVICES; i++) {
       if (device[i].name[0]) {
@@ -519,6 +566,7 @@ class ConfigPortal : public HttpGetHandler {
           "<td><script>document.currentScript.replaceWith(new Date(Date.now()-" << (signed)(now - device[i].lastSeen) << ").toLocaleString())</script></td>"
           "<td>" << device[i].peerRssi << "</td>"
           "<td><button onclick='window.location.href = \"/unpair/" << i << "\"'>&#128465;</button></td>"
+          "<td><button onclick='window.location.href = \"/otaupdate/" << i << "\"'>&#128428;</button></td>"
           "</tr>";
       }
     }
@@ -566,12 +614,6 @@ extern "C" void app_main(void) {
   GPIO::pinMode(IO_BUTTON, INPUT);
 
   // If no config, start the captive portal
-  wifi_config_t wifi_config = {
-      .sta = {
-          .ssid = "",
-          .password = "",
-          .threshold = {.authmode = WIFI_AUTH_WPA2_PSK},
-      }};
   size_t len;
 
   nvs_handle_t nvs_handle = -1;
