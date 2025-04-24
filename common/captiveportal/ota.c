@@ -50,11 +50,12 @@ esp_err_t ota_post_handler(httpd_req_t *req)
         ESP_LOGE(TAG, "esp_ota_set_boot_partition failed");
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Set Boot Partition Failed");
         return ESP_FAIL;
-    }
+                }
 
     httpd_resp_sendstr(req, "OTA update successful. Rebooting...");
     ESP_LOGI(TAG, "OTA update successful. Rebooting...");
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
+
+    vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();
     return ESP_OK;
 }

@@ -566,7 +566,7 @@ class ConfigPortal : public HttpGetHandler {
             "<h1>" << hostname << " (" << hub_ip << ")</h1>"
             "<h2>Devcies</h1>"
             "<table>"
-            "<tr><th>Name</th><th>Last seen</th><th>Rssi</th><th>Unpair</th><th>OTA Update</th></tr>";
+            "<tr><th>Name</th><th>Last seen</th><th>Rssi</th><th>Unpair</th><th>Build</th><th>OTA Update</th></tr>";
 
     for (int i = 0; i < MAX_DEVICES; i++) {
       if (device[i].name[0]) {
@@ -577,6 +577,7 @@ class ConfigPortal : public HttpGetHandler {
           "<td><script>document.currentScript.replaceWith(new Date(Date.now()-" << (signed)(now - device[i].lastSeen) << ").toLocaleString())</script></td>"
           "<td>" << device[i].peerRssi << "</td>"
           "<td><button onclick='window.location.href = \"/unpair/" << i << "\"'>&#128465;</button></td>"
+          "<td>" << (device[i].info ? device[i].info : "n/a") << "</td>"
           "<td><button onclick='window.location.href = \"/otaupdate/" << i << "\"'>&#128428;</button></td>"
           "</tr>";
       }
