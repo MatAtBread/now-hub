@@ -422,6 +422,7 @@ static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_
 
 class ConfigPortal : public HttpGetHandler {
  protected:
+  bool withClose;
   bool startsWith(const char *search, const char *match) {
     return strncmp(search, match, strlen(match)) == 0;
   }
@@ -453,7 +454,7 @@ class ConfigPortal : public HttpGetHandler {
   char *mqtt_server;
   bool done;
 
-  ConfigPortal(wifi_sta_config_t &sta, char *mqtt_server) : sta(sta), mqtt_server(mqtt_server) {
+  ConfigPortal(wifi_sta_config_t &sta, char *mqtt_server, bool withClose) : withClose(withClose), sta(sta), mqtt_server(mqtt_server) {
     done = false;
   }
 
@@ -463,7 +464,8 @@ class ConfigPortal : public HttpGetHandler {
       httpd_resp_set_status(req, "404 Not found");
       httpd_resp_send(req, "404 Not found", HTTPD_RESP_USE_STRLEN);
     } else if (startsWith(req->uri, "/close")) {
-      done = true;
+      if (withClose) done = true;
+      else esp_restart();
     } else if (startsWith(req->uri, "/set-wifi/")) {
       char input_param[sizeof(req->uri)];
       strncpy(input_param, req->uri + 10, sizeof(req->uri));
@@ -591,7 +593,7 @@ class ConfigPortal : public HttpGetHandler {
             "<tr><td>MQTT server</td><td><input id='mqtt' value='" << mqtt_server << "'></td></tr>"
             "</table>"
             "<button onclick='window.location.href = \"/set-wifi/\"+encodeURIComponent(\"ssid,pwd,mqtt\".split(\",\").map(id => document.getElementById(id).value).join(\"-\"))'>Save</button>"
-            "<button onclick='window.location.href = \"/close/\"'>Close</button>"
+            "<button onclick='window.location.href = \"/close/\"'>"<< (withClose ? "Close" : "Restart") <<"/button>"
             "<h2>OTA Update</h2>"
             "<div>"
             "  <input type='file' id='firmware'>"
@@ -641,7 +643,7 @@ extern "C" void app_main(void) {
     wifi_config.sta.ssid[sizeof(wifi_config.sta.ssid) - 1] = 0;
     wifi_config.sta.password[sizeof(wifi_config.sta.password) - 1] = 0;
 
-    auto portal = new ConfigPortal(wifi_config.sta, mqtt_uri);
+    auto portal = new ConfigPortal(wifi_config.sta, mqtt_uri, true);
     start_captive_portal(portal, "FreeHouse-HUB");
 
     bool led = true;
@@ -742,7 +744,7 @@ extern "C" void app_main(void) {
   esp_mqtt_client_start(mqtt_client);
 
   // Normal mode - no captive portal
-  auto portal = new ConfigPortal(wifi_config.sta, mqtt_uri);
+  auto portal = new ConfigPortal(wifi_config.sta, mqtt_uri, false);
   start_web_server(portal);
 
   int pressed = 0;
