@@ -593,7 +593,7 @@ class ConfigPortal : public HttpGetHandler {
             "<tr><td>MQTT server</td><td><input id='mqtt' value='" << mqtt_server << "'></td></tr>"
             "</table>"
             "<button onclick='window.location.href = \"/set-wifi/\"+encodeURIComponent(\"ssid,pwd,mqtt\".split(\",\").map(id => document.getElementById(id).value).join(\"-\"))'>Save</button>"
-            "<button onclick='window.location.href = \"/close/\"'>"<< (withClose ? "Close" : "Restart") <<"/button>"
+            "<button onclick='window.location.href = \"/close/\"'>"<< (withClose ? "Close" : "Restart") << "</button>"
             "<h2>OTA Update</h2>"
             "<div>"
             "  <input type='file' id='firmware'>"
