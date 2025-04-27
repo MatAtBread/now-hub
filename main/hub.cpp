@@ -128,11 +128,13 @@ static std::string metaJson(const device_t &dev) {
 
 static std::string hubStatusJson() {
   std::stringstream s;
+  bool comma = false;
   s << "[";
   for (int i = 0; i < MAX_DEVICES; i++) {
     const device_t &dev = device[i];
     if (dev.name[0]) {
-      if (i) s << ",";
+      if (comma) s << ",";
+      comma = true;
       s << metaJson(dev);
     }
   }
