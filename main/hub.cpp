@@ -639,6 +639,8 @@ extern "C" void app_main(void) {
     || ((len = sizeof(wifi_config.sta.password)), (nvs_get_str(nvs_handle, "wifipwd", (char *)wifi_config.sta.password, &len) != ESP_OK))
     || ((len = sizeof(mqtt_uri)), (nvs_get_str(nvs_handle, "mqtt", mqtt_uri, &len) != ESP_OK))) {
     if (nvs_handle != -1) nvs_close(nvs_handle);
+
+  no_net_start_captive_portal:
     ESP_LOGI(TAG, "No wifi credentials found");
     // Start captive portal which sets nvs keys
     mqtt_uri[sizeof(mqtt_uri) - 1] = 0;
@@ -697,7 +699,12 @@ extern "C" void app_main(void) {
   GPIO::digitalWrite(IO_LED_R, 1);
   GPIO::digitalWrite(IO_LED_G, 1);
   ESP_LOGI(TAG, "Connecting to WiFi %s", wifi_config.sta.ssid);
-  xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
+  if (xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, 60000 / portTICK_PERIOD_MS) & WIFI_CONNECTED_BIT) {
+    ESP_LOGI(TAG, "Connected to WiFi %s", wifi_config.sta.ssid);
+  } else {
+    ESP_LOGE(TAG, "Failed to connect to WiFi %s", wifi_config.sta.ssid);
+    goto no_net_start_captive_portal;
+  }
 
   // Get MAC address
   ESP_ERROR_CHECK(esp_wifi_get_mac(WIFI_IF_STA, gateway_mac));
