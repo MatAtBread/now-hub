@@ -5,6 +5,7 @@
 
 #include "../common/captiveportal/wifi-captiveportal.h"
 #include "../common/gpio/gpio.hpp"
+#include "./read_write_lock/rwl.hpp"
 #include "esp_log.h"
 #include "esp_now.h"
 #include "esp_mac.h"
@@ -12,6 +13,7 @@
 #include "mqtt_client.h"
 #include "nvs_flash.h"
 #include "cJSON.h"
+
 
 #define MULTILINE_STRING(...) #__VA_ARGS__
 
@@ -25,8 +27,8 @@ const char *MQTT_TOPIC = "FreeHouse";
 
 #define DEVICE_TIMEOUT 60 * 60 *1000UL  // 1 hour
 
-#define MACSTR "%02X:%02X:%02X:%02X:%02X:%02X"
-#define MAC2STR(mac) mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+//#define MACSTR "%02X:%02X:%02X:%02X:%02X:%02X"
+//#define MAC2STR(mac) mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
 
 #define RETAIN 1
 
@@ -46,9 +48,7 @@ MQTT topics:
 */
 
 typedef uint8_t MACAddr[6];
-typedef char device_name_t[20];
-
-#define MAX_DEVICES ESP_NOW_MAX_TOTAL_PEER_NUM
+typedef char device_name_t[ESP_NOW_MAX_TOTAL_PEER_NUM];
 
 typedef struct {
   MACAddr mac;
@@ -59,7 +59,7 @@ typedef struct {
   uint32_t lastSeen;
 } device_t;
 
-static device_t device[MAX_DEVICES];
+static SerializedStatic<device_t[ESP_NOW_MAX_TOTAL_PEER_NUM]>* devices;
 
 static MACAddr noDevice = {0, 0, 0, 0, 0, 0};
 
@@ -76,7 +76,9 @@ static wifi_config_t wifi_config = {
 };
 
 static int findDeviceMac(const uint8_t *mac) {
-  for (int i = 0; i < MAX_DEVICES; i++) {
+  Locked<device_t [20]> device(devices);
+
+  for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
     if (memcmp(device[i].mac, mac, sizeof(device[i].mac)) == 0) {
       // ESP_LOGI(TAG, "Found device %d " MACSTR " " MACSTR, i, MAC2STR(mac), MAC2STR(mac));
       return i;
@@ -85,22 +87,24 @@ static int findDeviceMac(const uint8_t *mac) {
   return -1;
 }
 
-static int findDeviceName(const char *name) {
-  for (int i = 0; i < MAX_DEVICES; i++) {
+static const device_t* findDeviceName(const char *name) {
+  Locked<device_t [20]> device(devices);
+
+  for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
     if (strncmp(device[i].name, name, sizeof(device_name_t)) == 0) {
-      return i;
+      return device + i;
     }
   }
-  return -1;
+  return NULL;
 }
 
-void unpairDevice(int i) {
-  ESP_LOGI(TAG, "Unpair device %s (%d)", device[i].name, i);
-
-  if (esp_now_is_peer_exist(device[i].mac)) {
-    esp_now_del_peer(device[i].mac);
+void unpairDevice(const uint8_t *mac) {
+  if (esp_now_is_peer_exist(mac)) {
+    esp_now_del_peer(mac);
   }
 
+  Locked<device_t [20]> device(devices);
+  int i = findDeviceMac(mac);
   memset(device[i].name, 0, sizeof(device[i].name));
   memset(device[i].mac, 0, sizeof(device[i].mac));
   device[i].pending = "";
@@ -127,10 +131,12 @@ static std::string metaJson(const device_t &dev) {
 }
 
 static std::string hubStatusJson() {
+  Locked<device_t [20]> device(devices);
+
   std::stringstream s;
   bool comma = false;
   s << "[";
-  for (int i = 0; i < MAX_DEVICES; i++) {
+  for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
     const device_t &dev = device[i];
     if (dev.name[0]) {
       if (comma) s << ",";
@@ -186,14 +192,18 @@ cJSON *shallow_merge(const char *dest_json_str, const char *src_json_str) {
   return dest; // Return merged JSON object
 }
 
-static void mergeAndSendPending(int deviceIndex, const char *str) {
+static void mergeAndSendPending(const MACAddr &mac, const char *str) {
+  Locked<device_t [20]> _locked(devices);
+
+  auto deviceIndex = findDeviceMac(mac);
+  auto device = &(_locked[deviceIndex]);
   // Check if the device index is valid
-  if (deviceIndex < 0 || deviceIndex >= MAX_DEVICES) {
+  if (deviceIndex < 0 || deviceIndex >= ESP_NOW_MAX_TOTAL_PEER_NUM) {
     ESP_LOGE(TAG, "Invalid device index: %d", deviceIndex);
     return;
   }
 
-  if (!memcmp(noDevice, device[deviceIndex].mac, sizeof(noDevice))) {
+  if (!memcmp(noDevice, device->mac, sizeof(noDevice))) {
     ESP_LOGE(TAG, "Invalid device mac: %d", deviceIndex);
     return;
   }
@@ -205,24 +215,24 @@ static void mergeAndSendPending(int deviceIndex, const char *str) {
   }
 
   // Check if the device has a pending message
-  if (device[deviceIndex].pending.length()) {
+  if (device->pending.length()) {
     // Merge pending messages
-    auto merged = shallow_merge(device[deviceIndex].pending.c_str(), str);
+    auto merged = shallow_merge(device->pending.c_str(), str);
     if (merged) {
       // Print merged JSON string
       char *merged_json_str = cJSON_PrintUnformatted(merged);
-      device[deviceIndex].pending = merged_json_str;
+      device->pending = merged_json_str;
       free(merged_json_str);
       // Free memory
       cJSON_Delete(merged);
     } else {
-      device[deviceIndex].pending = str;
+      device->pending = str;
     }
   } else {
-    device[deviceIndex].pending = str;
+    device->pending = str;
   }
 //  esp_now_send(device[idx].mac, (const uint8_t *)device[idx].pending.c_str(), device[idx].pending.length() + 1);
-  esp_now_send(device[deviceIndex].mac, (const uint8_t *)device[deviceIndex].pending.c_str(), device[deviceIndex].pending.length() + 1);
+  esp_now_send(device->mac, (const uint8_t *)device->pending.c_str(), device->pending.length() + 1);
 }
 
 static void mqtt_event_handler(void *args, esp_event_base_t base,
@@ -245,13 +255,13 @@ static void mqtt_event_handler(void *args, esp_event_base_t base,
       char *root = strtok(topic, "/");
       char *name = strtok(NULL, "/");
       char *subtopic = strtok(NULL, "/");
-      int deviceIndex;
+      const device_t* device;
 
       if (!name
         || !subtopic
         || strcmp(root, MQTT_TOPIC)
         || strcmp(subtopic, "set")
-        || (deviceIndex = findDeviceName(name)) == -1) {
+        || (device = findDeviceName(name)) == NULL) {
         ESP_LOGD(TAG, "Ignore hub mqtt message");
         free(topic);
         return;
@@ -261,7 +271,7 @@ static void mqtt_event_handler(void *args, esp_event_base_t base,
         ESP_LOGI(TAG, "Too much data for esp-now v2: %s %s", name, event->data);
       } else {
         auto str = bufAs0TermString(event->data, event->data_len);
-        mergeAndSendPending(deviceIndex, str);
+        mergeAndSendPending(device->mac, str);
         free(str);
       }
       free(topic);
@@ -295,7 +305,9 @@ static void sendNACK(const uint8_t *mac_addr) {
 }
 
 static void espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  Locked<device_t [20]> device(devices);
   const auto idx = findDeviceMac(mac_addr);
+
   if (status != ESP_OK) {
     ESP_LOGI(TAG, "Send to " MACSTR " (device %d %s) failed", MAC2STR(mac_addr), idx, idx >= 0 ? device[idx].name : "?");
   } else {
@@ -309,12 +321,13 @@ static void espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status
 }
 
 static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_t *data, int len) {
+  Locked<device_t [20]> device(devices);
   auto deviceIndex = findDeviceMac(esp_now_info->src_addr);
 
   if ((*(const uint32_t *)data) == PAIR[0]) {
     // This is a request to pair
     if (deviceIndex < 0) {
-      for (int i = 0; i < MAX_DEVICES; i++) {
+      for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
         if (!memcmp(noDevice, device[i].mac, sizeof(noDevice))) {
           deviceIndex = i;
           ESP_LOGI(TAG, "Assign " MACSTR ": slot %d", MAC2STR(esp_now_info->src_addr), deviceIndex);
@@ -359,7 +372,7 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
     }
   } else if ((*(const uint32_t *)data) == NACK[0]) {
     if (deviceIndex >= 0) {
-      unpairDevice(deviceIndex);
+      unpairDevice(esp_now_info->src_addr);
     } else {
       ESP_LOGI(TAG, "NACK from unknown device " MACSTR, MAC2STR(esp_now_info->src_addr));
     }
@@ -436,6 +449,12 @@ class ConfigPortal : public HttpGetHandler {
     return 0;
   }
 
+  static void macFromHex12(const char *hex, MACAddr &mac) {
+    for (int i = 0; i < 6; i++) {
+      mac[i] = hexValue(hex[i * 2]) * 16 + hexValue(hex[i * 2 + 1]);
+    }
+  }
+
   static void unencode(char *buf, const char *src, int size) {
     while (*src && size) {
       if (*src == '%') {
@@ -467,7 +486,12 @@ class ConfigPortal : public HttpGetHandler {
       httpd_resp_send(req, "404 Not found", HTTPD_RESP_USE_STRLEN);
     } else if (startsWith(req->uri, "/close")) {
       if (withClose) done = true;
-      else esp_restart();
+      else {
+        httpd_resp_set_status(req, "307 Temporary Redirect");
+        httpd_resp_set_hdr(req, "Location", "/");
+        httpd_resp_send(req, NULL, 0); // No response body needed
+        esp_restart();
+      }
     } else if (startsWith(req->uri, "/set-wifi/")) {
       char input_param[sizeof(req->uri)];
       strncpy(input_param, req->uri + 10, sizeof(req->uri));
@@ -487,13 +511,20 @@ class ConfigPortal : public HttpGetHandler {
           nvs_set_str(nvs_handle, "mqtt", mqtt_server);
           nvs_close(nvs_handle);
         }
-        done = true;
+        if (withClose) done = true;
+        else {
+          httpd_resp_set_status(req, "307 Temporary Redirect");
+          httpd_resp_set_hdr(req, "Location", "/");
+          httpd_resp_send(req, NULL, 0); // No response body needed
+          esp_restart();
+        }
       }
     } else if (startsWith(req->uri, "/unpair/")) {
-      int idx = atoi(req->uri + 8);
-      if (idx >=0 && idx < MAX_DEVICES) {
-        sendNACK(device[idx].mac);
-        unpairDevice(idx);
+      MACAddr mac;
+      macFromHex12(req->uri + 8, mac);
+      if (findDeviceMac(mac) >= 0) {
+        sendNACK(mac);
+        unpairDevice(mac);
         httpd_resp_set_status(req, "302 Temporary Redirect");
         // Redirect to the "/" anyGet directory
         httpd_resp_set_hdr(req, "Location", "/");
@@ -501,14 +532,15 @@ class ConfigPortal : public HttpGetHandler {
         httpd_resp_send(req, "Redirect", HTTPD_RESP_USE_STRLEN);
       }
     } else if (startsWith(req->uri, "/otaupdate/")) {
-      int idx = atoi(req->uri + 11);
-      if (idx >=0 && idx < MAX_DEVICES) {
+      MACAddr mac;
+      macFromHex12(req->uri + 11, mac);
+      if (findDeviceMac(mac) >= 0) {
         std::string otaJson = "{\"ota\":{\"url\":\"" OTA_ROOT_URI "\",\"ssid\":\""
               + std::string((const char *)sta.ssid)
               + "\",\"pwd\":\""
               + std::string((const char *)sta.password)
               + "\"}}";
-        mergeAndSendPending(idx, otaJson.c_str());
+        mergeAndSendPending(mac, otaJson.c_str());
 
         httpd_resp_set_status(req, "302 Temporary Redirect");
         // Redirect to the "/" anyGet directory
@@ -570,20 +602,24 @@ class ConfigPortal : public HttpGetHandler {
             "<h1>" << hostname << " (" << hub_ip << ")</h1>"
             "<h2>Devcies</h1>"
             "<table>"
-            "<tr><th>Name</th><th>Last seen</th><th>Rssi</th><th>Unpair</th><th>Build</th><th>OTA Update</th></tr>";
+            "<tr><th>Unpair</th><th>Name</th><th>Model</th><th>Last seen</th><th>Rssi</th><th>Build</th><th>Update</th></tr>";
 
-    for (int i = 0; i < MAX_DEVICES; i++) {
-      if (device[i].name[0]) {
-        // char mac[20];
-        // sprintf(mac, MACSTR, MAC2STR(device[i].mac));
-        html << "<tr>"
-          "<td>" << device[i].name << "</td>"
-          "<td><script>document.currentScript.replaceWith(new Date(Date.now()-" << (signed)(now - device[i].lastSeen) << ").toLocaleString())</script></td>"
-          "<td>" << device[i].peerRssi << "</td>"
-          "<td><button onclick='window.location.href = \"/unpair/" << i << "\"'>&#128465;</button></td>"
-          "<td>" << (device[i].info ? device[i].info : "n/a") << "</td>"
-          "<td><button onclick='window.location.href = \"/otaupdate/" << i << "\"'>&#128428;</button></td>"
-          "</tr>";
+    {
+      Locked<device_t [20]> device(devices);
+      for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
+        if (device[i].name[0]) {
+          char mac[20];
+          sprintf(mac, "%02x%02x%02x%02x%02x%02x", MAC2STR(device[i].mac));
+          html << "<tr>"
+            "<td><button onclick='window.location.href = \"/unpair/" << mac << "\"'>&#128465;</button></td>"
+            "<td>" << device[i].name << "</td>"
+            "<td><script>document.currentScript.replaceWith(" << (device[i].info ? device[i].info : "{ model:'?'}") << ".model)</script>" << "</td>"
+            "<td><script>document.currentScript.replaceWith(new Date(Date.now()-" << (signed)(now - device[i].lastSeen) << ").toLocaleString())</script></td>"
+            "<td>" << device[i].peerRssi << "</td>"
+            "<td><script>document.currentScript.replaceWith(" << (device[i].info ? device[i].info : "{ build:'?'}") << ".build)</script>" << "</td>"
+            "<td><button onclick='window.location.href = \"/otaupdate/" << mac << "\"'>&#128428;</button></td>"
+            "</tr>";
+        }
       }
     }
 
@@ -606,6 +642,9 @@ class ConfigPortal : public HttpGetHandler {
 
     httpd_resp_send(req, html.str().c_str(), HTTPD_RESP_USE_STRLEN);
 
+    // if (startsWith(req->uri, "/close")) {
+    //   if (!withClose) esp_restart();
+    // }
     return ESP_OK;
   }
 };
@@ -619,6 +658,9 @@ extern "C" void app_main(void) {
     ret = nvs_flash_init();
   }
   ESP_ERROR_CHECK(ret);
+
+  static device_t _devices[ESP_NOW_MAX_TOTAL_PEER_NUM];
+  devices = new SerializedStatic(_devices);
 
   // Initialize TCP/IP stack and WiFi
   ESP_ERROR_CHECK(esp_netif_init());
@@ -781,11 +823,11 @@ extern "C" void app_main(void) {
     }
 
     auto now = esp_log_timestamp();
-    for (int i = 0; i < MAX_DEVICES; i++) {
+    Locked device(devices);
+    for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
       if (device[i].name[0] && (signed)(now - device[i].lastSeen) > DEVICE_TIMEOUT) {
         ESP_LOGI(TAG, "Device %s timed out", device[i].name);
-//        esp_now_del_peer(device[i].mac);
-        unpairDevice(i);
+        unpairDevice(device[i].mac);
       }
     }
   }
