@@ -105,14 +105,17 @@ void unpairDevice(const uint8_t *mac) {
 
   Locked<device_t [20]> device(devices);
   int i = findDeviceMac(mac);
-  memset(device[i].name, 0, sizeof(device[i].name));
-  memset(device[i].mac, 0, sizeof(device[i].mac));
-  device[i].pending = "";
-  device[i].lastSeen = 0;
-  device[i].peerRssi = 0;
+  if (i >= 0) {
+    ESP_LOGI(TAG, "Unpair %s " MACSTR, device[i].name, MAC2STR(device[i].mac));
+    memset(device[i].name, 0, sizeof(device[i].name));
+    memset(device[i].mac, 0, sizeof(device[i].mac));
+    device[i].pending = "";
+    device[i].lastSeen = 0;
+    device[i].peerRssi = 0;
 
-  if (device[i].info) free(device[i].info);
-  device[i].info = NULL;
+    if (device[i].info) free(device[i].info);
+    device[i].info = NULL;
+  }
 }
 
 static std::string metaJson(const device_t &dev) {
@@ -156,6 +159,20 @@ static char *bufAs0TermString(const void *s, size_t n) {
   return d;
 }
 
+static uint8_t hexValue(const char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  return 0;
+}
+
+static void macFromHex12(const char *hex, MACAddr &mac, bool commas) {
+  int step = commas ? 3 : 2;
+  for (int i = 0; i < 6; i++) {
+    mac[i] = hexValue(hex[i * step]) * 16 + hexValue(hex[i * step + 1]);
+  }
+}
+
 cJSON *shallow_merge(const char *dest_json_str, const char *src_json_str) {
   // Parse destination and source JSON strings
   cJSON *dest = cJSON_Parse(dest_json_str);
@@ -190,6 +207,31 @@ cJSON *shallow_merge(const char *dest_json_str, const char *src_json_str) {
 
   // ESP_LOGI(TAG, "Merged JSON: %s = %s + %s", cJSON_Print(dest), dest_json_str, src_json_str); // Print merged JSON for debugging
   return dest; // Return merged JSON object
+}
+
+static void checkPromiscuousDevices(const char *src) {
+  cJSON *hubMsg = cJSON_Parse(src);
+  if (hubMsg && !cJSON_IsArray(hubMsg)) {
+    cJSON *elt = NULL;
+    cJSON_ArrayForEach(elt, hubMsg) {
+      if (cJSON_IsObject(elt)) {
+        cJSON *hub = cJSON_GetObjectItem(elt, "hub");
+        cJSON *mac = cJSON_GetObjectItem(elt, "mac");
+
+        // Verify both are strings before using
+        if (cJSON_IsString(hub) && cJSON_IsString(mac)) {
+          // If the message is NOT from us...
+          if (strcmp(hub_ip, hub->valuestring)) {
+            // If we have a record of this mac, unpair it
+            MACAddr devMac;
+            macFromHex12(mac->valuestring, devMac, true);
+            unpairDevice(devMac);
+          }
+        }
+      }
+    }
+    cJSON_Delete(hubMsg);
+  }
 }
 
 static void mergeAndSendPending(const MACAddr &mac, const char *str) {
@@ -257,12 +299,24 @@ static void mqtt_event_handler(void *args, esp_event_base_t base,
       char *subtopic = strtok(NULL, "/");
       const device_t* device;
 
+      // We ARE interested in the FreeHouse topic (with no subtop [device]) as we can listen to it, and
+      // if we hear that one of our devices has attached to another hub we can unpair it
+      if (!name && !subtopic && !strcmp(root,MQTT_TOPIC)) {
+        // This should be JSON array in the format returned by hubStatusJson()
+        auto str = bufAs0TermString(event->data, event->data_len);
+        ESP_LOGV(TAG, "checkPromiscuousDevices %s", str);
+        checkPromiscuousDevices(str);
+        free(str);
+        return;
+      }
+
+
       if (!name
         || !subtopic
         || strcmp(root, MQTT_TOPIC)
         || strcmp(subtopic, "set")
         || (device = findDeviceName(name)) == NULL) {
-        ESP_LOGD(TAG, "Ignore hub mqtt message");
+        ESP_LOGV(TAG, "Ignore hub mqtt message %s/%s/%s", root ? root : "?", name ? name : "?", subtopic ? subtopic : "?");
         free(topic);
         return;
       }
@@ -442,19 +496,6 @@ class ConfigPortal : public HttpGetHandler {
     return strncmp(search, match, strlen(match)) == 0;
   }
 
-  static uint8_t hexValue(const char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    return 0;
-  }
-
-  static void macFromHex12(const char *hex, MACAddr &mac) {
-    for (int i = 0; i < 6; i++) {
-      mac[i] = hexValue(hex[i * 2]) * 16 + hexValue(hex[i * 2 + 1]);
-    }
-  }
-
   static void unencode(char *buf, const char *src, int size) {
     while (*src && size) {
       if (*src == '%') {
@@ -480,11 +521,7 @@ class ConfigPortal : public HttpGetHandler {
   }
 
   esp_err_t getHandler(httpd_req_t *req) {
-    ESP_LOGI(TAG, "Serve %s", req->uri);
-    if (startsWith(req->uri, "/favicon.ico")) {
-      httpd_resp_set_status(req, "404 Not found");
-      httpd_resp_send(req, "404 Not found", HTTPD_RESP_USE_STRLEN);
-    } else if (startsWith(req->uri, "/close")) {
+    if (startsWith(req->uri, "/close")) {
       if (withClose) done = true;
       else {
         httpd_resp_set_status(req, "307 Temporary Redirect");
@@ -521,7 +558,7 @@ class ConfigPortal : public HttpGetHandler {
       }
     } else if (startsWith(req->uri, "/unpair/")) {
       MACAddr mac;
-      macFromHex12(req->uri + 8, mac);
+      macFromHex12(req->uri + 8, mac, false);
       if (findDeviceMac(mac) >= 0) {
         sendNACK(mac);
         unpairDevice(mac);
@@ -533,7 +570,7 @@ class ConfigPortal : public HttpGetHandler {
       }
     } else if (startsWith(req->uri, "/otaupdate/")) {
       MACAddr mac;
-      macFromHex12(req->uri + 11, mac);
+      macFromHex12(req->uri + 11, mac, false);
       if (findDeviceMac(mac) >= 0) {
         std::string otaJson = "{\"ota\":{\"url\":\"" OTA_ROOT_URI "\",\"ssid\":\""
               + std::string((const char *)sta.ssid)
@@ -548,6 +585,11 @@ class ConfigPortal : public HttpGetHandler {
         // iOS requires content in the response to detect a captive portal, simply redirecting is not sufficient.
         httpd_resp_send(req, "Redirect", HTTPD_RESP_USE_STRLEN);
       }
+    } else if (strcmp(req->uri,"") && strcmp(req->uri,"/")) {
+      ESP_LOGI(TAG, "Http unknown URL%s", req->uri);
+      httpd_resp_set_status(req, "404 Not found");
+      httpd_resp_send(req, "404 Not found", HTTPD_RESP_USE_STRLEN);
+      return ESP_OK;
     }
 
     // Send back the current status
@@ -650,7 +692,7 @@ class ConfigPortal : public HttpGetHandler {
 };
 
 extern "C" void app_main(void) {
-  esp_log_level_set(TAG, ESP_LOG_VERBOSE);
+  esp_log_level_set(TAG, ESP_LOG_DEBUG);
   // Initialize NVS
   esp_err_t ret = nvs_flash_init();
   if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
