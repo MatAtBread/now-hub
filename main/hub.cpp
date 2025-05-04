@@ -297,36 +297,28 @@ static void mqtt_event_handler(void *args, esp_event_base_t base,
       char *root = strtok(topic, "/");
       char *name = strtok(NULL, "/");
       char *subtopic = strtok(NULL, "/");
-      const device_t* device;
+      const device_t *device;
 
       // We ARE interested in the FreeHouse topic (with no subtop [device]) as we can listen to it, and
       // if we hear that one of our devices has attached to another hub we can unpair it
-      if (!name && !subtopic && !strcmp(root,MQTT_TOPIC)) {
+      if (!name && !subtopic && !strcmp(root, MQTT_TOPIC)) {
         // This should be JSON array in the format returned by hubStatusJson()
         auto str = bufAs0TermString(event->data, event->data_len);
         ESP_LOGV(TAG, "checkPromiscuousDevices %s", str);
         checkPromiscuousDevices(str);
         free(str);
-        return;
-      }
-
-
-      if (!name
-        || !subtopic
-        || strcmp(root, MQTT_TOPIC)
-        || strcmp(subtopic, "set")
-        || (device = findDeviceName(name)) == NULL) {
-        ESP_LOGV(TAG, "Ignore hub mqtt message %s/%s/%s", root ? root : "?", name ? name : "?", subtopic ? subtopic : "?");
-        free(topic);
-        return;
-      }
-
-      if (event->data_len >= ESP_NOW_MAX_DATA_LEN_V2) {
-        ESP_LOGI(TAG, "Too much data for esp-now v2: %s %s", name, event->data);
       } else {
-        auto str = bufAs0TermString(event->data, event->data_len);
-        mergeAndSendPending(device->mac, str);
-        free(str);
+        if (!name || !subtopic || strcmp(root, MQTT_TOPIC) || strcmp(subtopic, "set") || (device = findDeviceName(name)) == NULL) {
+          ESP_LOGV(TAG, "Ignore hub mqtt message %s/%s/%s", root ? root : "?", name ? name : "?", subtopic ? subtopic : "?");
+        } else {
+          if (event->data_len >= ESP_NOW_MAX_DATA_LEN_V2) {
+            ESP_LOGI(TAG, "Too much data for esp-now v2: %s %s", name, event->data);
+          } else {
+            auto str = bufAs0TermString(event->data, event->data_len);
+            mergeAndSendPending(device->mac, str);
+            free(str);
+          }
+        }
       }
       free(topic);
     } break;
