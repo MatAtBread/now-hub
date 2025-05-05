@@ -223,27 +223,29 @@ static void checkPromiscuousDevices(const char *src) {
         cJSON *name = cJSON_GetObjectItem(elt, "name");
         cJSON *hub = cJSON_GetObjectItem(elt, "hub");
         cJSON *mac = cJSON_GetObjectItem(elt, "mac");
+        cJSON *lastSeen = cJSON_GetObjectItem(elt, "lastSeen");
 
         // Verify both are strings before using
-        if (cJSON_IsString(hub) && cJSON_IsString(mac)) {
+        if (cJSON_IsString(hub) && cJSON_IsString(mac) && cJSON_IsNumber(lastSeen)) {
           // If the message is NOT from us...
           MACAddr devMac;
           macFromHex12(mac->valuestring, devMac, true);
-          auto promiscuous = strcmp(hub_ip, hub->valuestring);
-          if (promiscuous) {
+          auto promiscuous = strcmp(hub_ip, hub->valuestring) ? lastSeen->valueint : -1;
+          // If seen from another hub in the last half second
+          if (promiscuous >=0 && promiscuous < 500) {
             // If we have a record of this mac, unpair it
             unpairDevice(devMac, "promiscuous");
           }
-          ESP_LOGV(TAG, "Device %s (%s, " MACSTR ") was seen on hub %s [%x]", name ? name->valuestring : "?", mac->valuestring, MAC2STR(devMac), hub->valuestring, promiscuous);
+          ESP_LOGV(TAG, "Device %s (%s, " MACSTR ") was seen on hub %.80s [%x]", name ? name->valuestring : "?", mac->valuestring, MAC2STR(devMac), hub->valuestring, promiscuous);
         } else {
-          ESP_LOGI(TAG, "checkPromiscuousDevices missing mac/hub: %d %d", mac ? mac->type : cJSON_Invalid, hub ? hub->type : cJSON_Invalid);
+          ESP_LOGI(TAG, "checkPromiscuousDevices missing mac/hub/lastSeen: 0x%x 0x%x 0x%x", mac ? mac->type : cJSON_Invalid, hub ? hub->type : cJSON_Invalid, lastSeen ? lastSeen->type : cJSON_Invalid);
         }
       } else {
-        ESP_LOGI(TAG, "checkPromiscuousDevices not a JSON object: %s", elt->string);
+        ESP_LOGI(TAG, "checkPromiscuousDevices not a JSON object: %.80s", elt->string);
       }
     }
   } else {
-    ESP_LOGI(TAG, "checkPromiscuousDevices not a JSON array: %s", src);
+    ESP_LOGI(TAG, "checkPromiscuousDevices not a JSON array: %*.80s", src);
   }
   if (hubMsg)
     cJSON_Delete(hubMsg);
