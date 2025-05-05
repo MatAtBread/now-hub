@@ -7,6 +7,7 @@
 #include "../common/gpio/gpio.hpp"
 #include "./read_write_lock/rwl.hpp"
 #include "esp_log.h"
+// #include "esp_heap_trace.h"
 #include "esp_now.h"
 #include "esp_mac.h"
 #include "esp_wifi.h"
@@ -48,7 +49,7 @@ MQTT topics:
 */
 
 typedef uint8_t MACAddr[6];
-typedef char device_name_t[ESP_NOW_MAX_TOTAL_PEER_NUM];
+typedef char device_name_t[32];
 
 typedef struct {
   MACAddr mac;
@@ -59,7 +60,8 @@ typedef struct {
   uint32_t lastSeen;
 } device_t;
 
-static SerializedStatic<device_t[ESP_NOW_MAX_TOTAL_PEER_NUM]>* devices;
+typedef device_t device_table_t[ESP_NOW_MAX_TOTAL_PEER_NUM];
+static SerializedStatic<device_table_t>* devices;
 
 static MACAddr noDevice = {0, 0, 0, 0, 0, 0};
 
@@ -76,7 +78,7 @@ static wifi_config_t wifi_config = {
 };
 
 static int findDeviceMac(const uint8_t *mac) {
-  Locked<device_t [20]> device(devices);
+  Locked<device_table_t> device(devices);
 
   for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
     if (memcmp(device[i].mac, mac, sizeof(device[i].mac)) == 0) {
@@ -88,7 +90,7 @@ static int findDeviceMac(const uint8_t *mac) {
 }
 
 static const device_t* findDeviceName(const char *name) {
-  Locked<device_t [20]> device(devices);
+  Locked<device_table_t> device(devices);
 
   for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
     if (strncmp(device[i].name, name, sizeof(device_name_t)) == 0) {
@@ -98,15 +100,15 @@ static const device_t* findDeviceName(const char *name) {
   return NULL;
 }
 
-void unpairDevice(const uint8_t *mac) {
+static void unpairDevice(const uint8_t *mac, const char *reason) {
   if (esp_now_is_peer_exist(mac)) {
     esp_now_del_peer(mac);
   }
 
-  Locked<device_t [20]> device(devices);
+  Locked<device_table_t> device(devices);
   int i = findDeviceMac(mac);
   if (i >= 0) {
-    ESP_LOGI(TAG, "Unpair %s " MACSTR, device[i].name, MAC2STR(device[i].mac));
+    ESP_LOGI(TAG, "Unpair (%s) " MACSTR " (%s)", reason, MAC2STR(device[i].mac), device[i].name);
     memset(device[i].name, 0, sizeof(device[i].name));
     memset(device[i].mac, 0, sizeof(device[i].mac));
     device[i].pending = "";
@@ -115,6 +117,8 @@ void unpairDevice(const uint8_t *mac) {
 
     if (device[i].info) free(device[i].info);
     device[i].info = NULL;
+  } else {
+    ESP_LOGI(TAG, "Unpair (%s) " MACSTR " %s", reason, MAC2STR(device[i].mac), "(unknown mac)");
   }
 }
 
@@ -134,7 +138,7 @@ static std::string metaJson(const device_t &dev) {
 }
 
 static std::string hubStatusJson() {
-  Locked<device_t [20]> device(devices);
+  Locked<device_table_t> device(devices);
 
   std::stringstream s;
   bool comma = false;
@@ -225,17 +229,18 @@ static void checkPromiscuousDevices(const char *src) {
             // If we have a record of this mac, unpair it
             MACAddr devMac;
             macFromHex12(mac->valuestring, devMac, true);
-            unpairDevice(devMac);
+            unpairDevice(devMac, "promiscuous");
           }
         }
       }
     }
-    cJSON_Delete(hubMsg);
   }
+  if (hubMsg)
+    cJSON_Delete(hubMsg);
 }
 
 static void mergeAndSendPending(const MACAddr &mac, const char *str) {
-  Locked<device_t [20]> _locked(devices);
+  Locked<device_table_t> _locked(devices);
 
   auto deviceIndex = findDeviceMac(mac);
   auto device = &(_locked[deviceIndex]);
@@ -273,7 +278,8 @@ static void mergeAndSendPending(const MACAddr &mac, const char *str) {
   } else {
     device->pending = str;
   }
-//  esp_now_send(device[idx].mac, (const uint8_t *)device[idx].pending.c_str(), device[idx].pending.length() + 1);
+
+  ESP_LOGD(TAG, "Send " MACSTR " pending (merge)", MAC2STR(device->mac));
   esp_now_send(device->mac, (const uint8_t *)device->pending.c_str(), device->pending.length() + 1);
 }
 
@@ -346,12 +352,14 @@ static void sendNACK(const uint8_t *mac_addr) {
 
     esp_now_add_peer(&peer);
   }
+  ESP_LOGD(TAG, "Send " MACSTR " NACK", MAC2STR(mac_addr));
+  // vTaskDelay(50 / portTICK_PERIOD_MS); // We need to delay otherwise we delete the peer too quickly. [upd: just let it fail]
   esp_now_send(mac_addr, (uint8_t *)NACK, sizeof(NACK));
   esp_now_del_peer(mac_addr);
 }
 
 static void espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status) {
-  Locked<device_t [20]> device(devices);
+  Locked<device_table_t> device(devices);
   const auto idx = findDeviceMac(mac_addr);
 
   if (status != ESP_OK) {
@@ -359,7 +367,7 @@ static void espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status
   } else {
     if (idx >= 0) {
       if (device[idx].pending.length()) {
-        ESP_LOGI(TAG, "Delivered to %s: %s", device[idx].name, device[idx].pending.c_str());
+        ESP_LOGD(TAG, "Delivered to %s: %s", device[idx].name, device[idx].pending.c_str());
         device[idx].pending = "";
       }
     }
@@ -367,7 +375,7 @@ static void espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status
 }
 
 static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_t *data, int len) {
-  Locked<device_t [20]> device(devices);
+  Locked<device_table_t> device(devices);
   auto deviceIndex = findDeviceMac(esp_now_info->src_addr);
 
   if ((*(const uint32_t *)data) == PAIR[0]) {
@@ -376,16 +384,17 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
       for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
         if (!memcmp(noDevice, device[i].mac, sizeof(noDevice))) {
           deviceIndex = i;
-          ESP_LOGI(TAG, "Assign " MACSTR ": slot %d", MAC2STR(esp_now_info->src_addr), deviceIndex);
+          ESP_LOGI(TAG, "Assign " MACSTR " to slot %d", MAC2STR(esp_now_info->src_addr), deviceIndex);
           break;
         }
       }
     }
+
     if (deviceIndex >= 0) {
       device[deviceIndex].peerRssi = esp_now_info->rx_ctrl->rssi;
       device[deviceIndex].lastSeen = esp_log_timestamp();
       char *name = bufAs0TermString(data + 4, len - 4);
-      // ESP_LOGI(TAG, "PAIR " MACSTR ": %s", MAC2STR(esp_now_info->src_addr), name);
+      ESP_LOGD(TAG, "PAIR " MACSTR ": %s", MAC2STR(esp_now_info->src_addr), name);
       strtok(name, PAIR_DELIM);
       char *hub = strtok(NULL, PAIR_DELIM);
       if (!hub || strcmp(hub, MQTT_TOPIC)) {
@@ -410,6 +419,8 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
 
         esp_now_add_peer(&peer);
       }
+
+      ESP_LOGD(TAG, "Send " MACSTR " PACK", MAC2STR(esp_now_info->src_addr));
       esp_now_send(esp_now_info->src_addr, (const uint8_t *)PACK, sizeof(PACK));
       esp_mqtt_client_publish(mqtt_client, MQTT_TOPIC, hubStatusJson().c_str(), 0, 1, RETAIN);
     } else {
@@ -418,7 +429,7 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
     }
   } else if ((*(const uint32_t *)data) == NACK[0]) {
     if (deviceIndex >= 0) {
-      unpairDevice(esp_now_info->src_addr);
+      unpairDevice(esp_now_info->src_addr, "NACK");
     } else {
       ESP_LOGI(TAG, "NACK from unknown device " MACSTR, MAC2STR(esp_now_info->src_addr));
     }
@@ -435,7 +446,6 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
       // We add meta data to the payload
       char *payloadData = bufAs0TermString(data, len);
       cJSON *payload = cJSON_Parse(payloadData);
-      free(payloadData);
       if (payload) {
         cJSON *meta = cJSON_Parse(metaJson(device[deviceIndex]).c_str());
         cJSON_AddItemToObject(payload, "meta", meta);
@@ -447,6 +457,7 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
       } else {
         ESP_LOGW(TAG, "Failed to parse JSON: %*.s", len, data);
       }
+      free(payloadData);
     } else {
       ESP_LOGI(TAG, "NACK data from unknown device " MACSTR " %.*s", MAC2STR(esp_now_info->src_addr), len, data);
       sendNACK(esp_now_info->src_addr);
@@ -456,8 +467,10 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
   }
 
   if (deviceIndex >= 0) {
-    if (device[deviceIndex].pending.length())
+    if (device[deviceIndex].pending.length()) {
+      ESP_LOGD(TAG, "Send " MACSTR " pending (recv)", MAC2STR(esp_now_info->src_addr));
       esp_now_send(device[deviceIndex].mac, (const uint8_t *)device[deviceIndex].pending.c_str(), device[deviceIndex].pending.length() + 1);
+    }
   }
 }
 
@@ -553,7 +566,7 @@ class ConfigPortal : public HttpGetHandler {
       macFromHex12(req->uri + 8, mac, false);
       if (findDeviceMac(mac) >= 0) {
         sendNACK(mac);
-        unpairDevice(mac);
+        unpairDevice(mac, "user request");
         httpd_resp_set_status(req, "302 Temporary Redirect");
         // Redirect to the "/" anyGet directory
         httpd_resp_set_hdr(req, "Location", "/");
@@ -639,7 +652,7 @@ class ConfigPortal : public HttpGetHandler {
             "<tr><th>Unpair</th><th>Name</th><th>Model</th><th>Last seen</th><th>Rssi</th><th>Build</th><th>Update</th></tr>";
 
     {
-      Locked<device_t [20]> device(devices);
+      Locked<device_table_t> device(devices);
       for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
         if (device[i].name[0]) {
           char mac[20];
@@ -684,7 +697,7 @@ class ConfigPortal : public HttpGetHandler {
 };
 
 extern "C" void app_main(void) {
-  esp_log_level_set(TAG, ESP_LOG_DEBUG);
+  esp_log_level_set(TAG, ESP_LOG_INFO);
   // Initialize NVS
   esp_err_t ret = nvs_flash_init();
   if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -693,7 +706,7 @@ extern "C" void app_main(void) {
   }
   ESP_ERROR_CHECK(ret);
 
-  static device_t _devices[ESP_NOW_MAX_TOTAL_PEER_NUM];
+  static device_table_t _devices;
   devices = new SerializedStatic(_devices);
 
   // Initialize TCP/IP stack and WiFi
@@ -835,6 +848,12 @@ extern "C" void app_main(void) {
   int pressed = 0;
   // LED off: running
   GPIO::digitalWrite(IO_LED_G, 0);
+
+
+  // static heap_trace_record_t trace_record[10]; // Must be in internal RAM
+  // heap_trace_init_standalone(trace_record, 10);
+  // heap_trace_start(HEAP_TRACE_LEAKS);
+
   while (1) {
     auto button = GPIO::digitalRead(IO_BUTTON);
     GPIO::digitalWrite(IO_LED_B, !button);
@@ -854,6 +873,7 @@ extern "C" void app_main(void) {
     } else {
       pressed = 0;
       vTaskDelay(1000 / portTICK_PERIOD_MS);
+      // heap_trace_dump();
     }
 
     auto now = esp_log_timestamp();
@@ -861,8 +881,9 @@ extern "C" void app_main(void) {
     for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
       if (device[i].name[0] && (signed)(now - device[i].lastSeen) > DEVICE_TIMEOUT) {
         ESP_LOGI(TAG, "Device %s timed out", device[i].name);
-        unpairDevice(device[i].mac);
+        unpairDevice(device[i].mac, "time out");
       }
     }
   }
+
 }
