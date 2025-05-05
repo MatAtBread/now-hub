@@ -15,7 +15,7 @@
 #include "nvs_flash.h"
 #include "cJSON.h"
 
-
+#define BUILD_TIMESTAMP __DATE__ " " __TIME__
 #define MULTILINE_STRING(...) #__VA_ARGS__
 
 // These should be configurable
@@ -118,7 +118,7 @@ static void unpairDevice(const uint8_t *mac, const char *reason) {
     if (device[i].info) free(device[i].info);
     device[i].info = NULL;
   } else {
-    ESP_LOGI(TAG, "Unpair (%s) " MACSTR " %s", reason, MAC2STR(device[i].mac), "(unknown mac)");
+    ESP_LOGD(TAG, "Unpair (%s) " MACSTR " %s", reason, MAC2STR(mac), "(unknown mac)");
   }
 }
 
@@ -172,6 +172,7 @@ static uint8_t hexValue(const char c) {
 
 static void macFromHex12(const char *hex, MACAddr &mac, bool commas) {
   int step = commas ? 3 : 2;
+  memset(mac,0,sizeof (mac));
   for (int i = 0; i < 6; i++) {
     mac[i] = hexValue(hex[i * step]) * 16 + hexValue(hex[i * step + 1]);
   }
@@ -215,25 +216,34 @@ cJSON *shallow_merge(const char *dest_json_str, const char *src_json_str) {
 
 static void checkPromiscuousDevices(const char *src) {
   cJSON *hubMsg = cJSON_Parse(src);
-  if (hubMsg && !cJSON_IsArray(hubMsg)) {
+  if (hubMsg && cJSON_IsArray(hubMsg)) {
     cJSON *elt = NULL;
     cJSON_ArrayForEach(elt, hubMsg) {
       if (cJSON_IsObject(elt)) {
+        cJSON *name = cJSON_GetObjectItem(elt, "name");
         cJSON *hub = cJSON_GetObjectItem(elt, "hub");
         cJSON *mac = cJSON_GetObjectItem(elt, "mac");
 
         // Verify both are strings before using
         if (cJSON_IsString(hub) && cJSON_IsString(mac)) {
           // If the message is NOT from us...
-          if (strcmp(hub_ip, hub->valuestring)) {
+          MACAddr devMac;
+          macFromHex12(mac->valuestring, devMac, true);
+          auto promiscuous = strcmp(hub_ip, hub->valuestring);
+          if (promiscuous) {
             // If we have a record of this mac, unpair it
-            MACAddr devMac;
-            macFromHex12(mac->valuestring, devMac, true);
             unpairDevice(devMac, "promiscuous");
           }
+          ESP_LOGV(TAG, "Device %s (%s, " MACSTR ") was seen on hub %s [%x]", name ? name->valuestring : "?", mac->valuestring, MAC2STR(devMac), hub->valuestring, promiscuous);
+        } else {
+          ESP_LOGI(TAG, "checkPromiscuousDevices missing mac/hub: %d %d", mac ? mac->type : cJSON_Invalid, hub ? hub->type : cJSON_Invalid);
         }
+      } else {
+        ESP_LOGI(TAG, "checkPromiscuousDevices not a JSON object: %s", elt->string);
       }
     }
+  } else {
+    ESP_LOGI(TAG, "checkPromiscuousDevices not a JSON array: %s", src);
   }
   if (hubMsg)
     cJSON_Delete(hubMsg);
@@ -363,7 +373,8 @@ static void espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status
   const auto idx = findDeviceMac(mac_addr);
 
   if (status != ESP_OK) {
-    ESP_LOGI(TAG, "Send to " MACSTR " (device %d %s) failed", MAC2STR(mac_addr), idx, idx >= 0 ? device[idx].name : "?");
+    // debug, as it will be sent when the device connects with a PACK from the .pending member
+    ESP_LOGD(TAG, "Send to " MACSTR " (device %d %s) failed", MAC2STR(mac_addr), idx, idx >= 0 ? device[idx].name : "?");
   } else {
     if (idx >= 0) {
       if (device[idx].pending.length()) {
@@ -686,7 +697,7 @@ class ConfigPortal : public HttpGetHandler {
             "  <input type='file' id='firmware'>"
             "  <button onclick='ota_upload(this)'>Update</button>"
             "</div>"
-            "<div>Current: " __DATE__ " " __TIME__ "</div>"
+            "<div>Current: " BUILD_TIMESTAMP "</div>"
             "</body></html>";
 
     httpd_resp_send(req, html.str().c_str(), HTTPD_RESP_USE_STRLEN);
@@ -700,6 +711,8 @@ class ConfigPortal : public HttpGetHandler {
 
 extern "C" void app_main(void) {
   esp_log_level_set(TAG, ESP_LOG_INFO);
+  // esp_log_level_set("*", ESP_LOG_DEBUG);
+
   // Initialize NVS
   esp_err_t ret = nvs_flash_init();
   if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -710,6 +723,8 @@ extern "C" void app_main(void) {
 
   static device_table_t _devices;
   devices = new SerializedStatic(_devices);
+
+  ESP_LOGI(TAG, "Startup. Build: " BUILD_TIMESTAMP);
 
   // Initialize TCP/IP stack and WiFi
   ESP_ERROR_CHECK(esp_netif_init());
