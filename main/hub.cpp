@@ -558,6 +558,8 @@ class ConfigPortal : public HttpGetHandler {
           httpd_resp_set_status(req, "307 Temporary Redirect");
           httpd_resp_set_hdr(req, "Location", "/");
           httpd_resp_send(req, NULL, 0); // No response body needed
+          // Delay to flush response
+          vTaskDelay(100 / portTICK_PERIOD_MS);
           esp_restart();
         }
       }
@@ -776,6 +778,13 @@ extern "C" void app_main(void) {
 
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
   ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+  wifi_country_t country = {
+    .cc = "EU",           // Country code for Europe
+    .schan = 1,           // Start channel must be 1
+    .nchan = 13,          // Number of channels allowed in EU (channels 1 to 13)
+    .policy = WIFI_COUNTRY_POLICY_MANUAL  // Use manual policy to enforce these settings
+  };
+  esp_wifi_set_country(&country);
 
   ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
 
