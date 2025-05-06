@@ -222,6 +222,7 @@ static bool checkPromiscuousDevices(const char *src) {
   if (hubMsg) {
     if (cJSON_IsArray(hubMsg)) {
       cJSON *elt = NULL;
+      Locked<device_table_t> device(devices);
       cJSON_ArrayForEach(elt, hubMsg) {
         if (cJSON_IsObject(elt)) {
           cJSON *name = cJSON_GetObjectItem(elt, "name");
@@ -235,8 +236,10 @@ static bool checkPromiscuousDevices(const char *src) {
             MACAddr devMac;
             macFromHex12(mac->valuestring, devMac, true);
             // If seen from another hub in the last half second and we have a record of this mac, unpair it (unpairDevice returns false if we didn;t know about it)
-            if (strcmp(hub_ip, hub->valuestring) != 0 // different hub
-              && lastSeen->valueint < 500 // Recent message from the different hub
+            int i = findDeviceMac(devMac);
+            if (i >= 0 // We have a record of this decive
+              && strcmp(hub_ip, hub->valuestring) != 0 // but this is from a different hub
+              && lastSeen->valueint < device[i].lastSeen // and is more recent that our record
               && unpairDevice(devMac, "promiscuous")) {
               ESP_LOGI(TAG, "Device %s (%s, " MACSTR ") was seen on hub %.80s (we are %s) %dms ago",
                 name ? name->valuestring : "?",
