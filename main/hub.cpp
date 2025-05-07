@@ -133,7 +133,7 @@ static std::string metaJson(const device_t *dev) {
 }
 
 static std::string hubStatusJson() {
-  Locked<device_table_t> device(devices);
+  Locked device(devices);
 
   std::stringstream s;
   bool comma = false;
@@ -209,7 +209,7 @@ cJSON *shallow_merge(const char *dest_json_str, const char *src_json_str) {
   return dest; // Return merged JSON object
 }
 
-static bool checkPromiscuousDevices(Locked<device_table_t> &device,  char *src) {
+static void checkPromiscuousDevices(Locked<device_table_t> &device,  char *src) {
   cJSON *hubMsg = cJSON_Parse(src);
   if (hubMsg) {
     if (cJSON_IsArray(hubMsg)) {
@@ -228,17 +228,16 @@ static bool checkPromiscuousDevices(Locked<device_table_t> &device,  char *src) 
             macFromHex12(mac->valuestring, devMac, true);
             // If seen from another hub in the last half second and we have a record of this mac, unpair it (unpairDevice returns false if we didn;t know about it)
             auto dev = findDeviceMac(device, devMac);
-            if (dev != NULL // We have a record of this decive
-              && strcmp(hub_ip, hub->valuestring) != 0 // but this is from a different hub
+            if (dev != NULL && strcmp(hub_ip, hub->valuestring) != 0 // We have a record of this device, but this is from a different hub
             ) {
-              // unpairDevice(devMac, "promiscuous");
-              dev->lastSeen = PROMISCUOUS_TIME;
               ESP_LOGI(TAG, "Device %s (%s, " MACSTR ") was seen on hub %.80s (we are %s) %dms ago",
                 name ? name->valuestring : "?",
                 mac->valuestring, MAC2STR(devMac),
                 hub->valuestring, hub_ip,
                 lastSeen->valueint
               );
+              // unpairDevice(devMac, "promiscuous");
+              dev->lastSeen = PROMISCUOUS_TIME;
             }
           } else {
             ESP_LOGI(TAG, "checkPromiscuousDevices missing mac/hub/lastSeen: 0x%x 0x%x 0x%x", mac ? mac->type : cJSON_Invalid, hub ? hub->type : cJSON_Invalid, lastSeen ? lastSeen->type : cJSON_Invalid);
@@ -251,11 +250,9 @@ static bool checkPromiscuousDevices(Locked<device_table_t> &device,  char *src) 
       ESP_LOGI(TAG, "checkPromiscuousDevices not a JSON array: %.80s", src);
     }
     cJSON_Delete(hubMsg);
-    return true;
   } else {
     ESP_LOGW(TAG, "checkPromiscuousDevices not JSON: %p", src);
     // Dump as hex??
-    return false;
   }
 }
 
@@ -327,7 +324,7 @@ static void mqtt_event_handler(void *args, esp_event_base_t base,
       char *root = strtok(topic, "/");
       char *name = strtok(NULL, "/");
       char *subtopic = strtok(NULL, "/");
-      Locked<device_table_t> device(devices);
+      Locked device(devices);
       device_t *dev;
 
       // We ARE interested in the FreeHouse topic (with no subtop [device]) as we can listen to it, and
@@ -336,9 +333,7 @@ static void mqtt_event_handler(void *args, esp_event_base_t base,
       if (!name && !subtopic && root && !strcmp(root, MQTT_TOPIC)) {
         // This should be JSON array in the format returned by hubStatusJson()
         auto str = bufAs0TermString(event->data, event->data_len);
-        auto f = checkPromiscuousDevices(device, str);
-        if (!f)
-          ESP_LOGW(TAG,"Bad json? %.80s %d",str,event->data_len);
+        checkPromiscuousDevices(device, str);
         free(str);
       } else {
         if (!name || !subtopic || strcmp(root, MQTT_TOPIC) || strcmp(subtopic, "set") || (dev = findDeviceName(device, name)) == NULL) {
@@ -386,7 +381,7 @@ static void sendNACK(const uint8_t *mac_addr) {
 }
 
 static void espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status) {
-  Locked<device_table_t> device(devices);
+  Locked device(devices);
   const auto dev = findDeviceMac(device, mac_addr);
 
   if (status != ESP_OK) {
@@ -403,7 +398,7 @@ static void espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status
 }
 
 static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_t *data, int len) {
-  Locked<device_table_t> device(devices);
+  Locked device(devices);
   auto dev = findDeviceMac(device, esp_now_info->src_addr);
 
   if ((*(const uint32_t *)data) == PAIR[0]) {
@@ -412,7 +407,7 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
       for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
         if (!memcmp(noDevice, device[i].mac, sizeof(noDevice))) {
           dev = &device[i];
-          ESP_LOGI(TAG, "Assign " MACSTR " to slot %d", MAC2STR(esp_now_info->src_addr), i);
+          ESP_LOGI(TAG, "Assign " MACSTR " to slot %d [%.*s]", MAC2STR(esp_now_info->src_addr), i, len - 4, data + 4);
           break;
         }
       }
@@ -594,7 +589,7 @@ class ConfigPortal : public HttpGetHandler {
     } else if (startsWith(req->uri, "/unpair/")) {
       MACAddr mac;
       macFromHex12(req->uri + 8, mac, false);
-      Locked<device_table_t> device(devices);
+      Locked device(devices);
       auto dev = findDeviceMac(device, mac);
       if (dev != NULL) {
         sendNACK(mac);
@@ -608,7 +603,7 @@ class ConfigPortal : public HttpGetHandler {
     } else if (startsWith(req->uri, "/otaupdate/")) {
       MACAddr mac;
       macFromHex12(req->uri + 11, mac, false);
-      Locked<device_table_t> device(devices);
+      Locked device(devices);
       auto dev = findDeviceMac(device, mac);
       if (dev != NULL) {
         std::string otaJson = "{\"ota\":{\"url\":\"" OTA_ROOT_URI "\",\"ssid\":\""
@@ -686,7 +681,7 @@ class ConfigPortal : public HttpGetHandler {
             "<tr><th>Unpair</th><th>Name</th><th>Model</th><th>Last seen</th><th>Rssi</th><th>Build</th><th>Update</th></tr>";
 
     {
-      Locked<device_table_t> device(devices);
+      Locked device(devices);
       for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
         if (device[i].name[0]) {
           char mac[20];
@@ -833,7 +828,7 @@ extern "C" void app_main(void) {
   GPIO::digitalWrite(IO_LED_R, 1);
   GPIO::digitalWrite(IO_LED_G, 1);
   ESP_LOGI(TAG, "Connecting to WiFi %s", wifi_config.sta.ssid);
-  if (xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, 60000 / portTICK_PERIOD_MS) & WIFI_CONNECTED_BIT) {
+  if (xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, 30000 / portTICK_PERIOD_MS) & WIFI_CONNECTED_BIT) {
     ESP_LOGI(TAG, "Connected to WiFi %s", wifi_config.sta.ssid);
   } else {
     ESP_LOGE(TAG, "Failed to connect to WiFi %s", wifi_config.sta.ssid);
