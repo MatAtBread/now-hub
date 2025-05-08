@@ -101,7 +101,8 @@ static device_t* findDeviceName(Locked<device_table_t>& device, const char *name
 
 static void unpairDevice(device_t *dev, const char *reason) {
   if (dev != NULL) {
-    ESP_LOGI(TAG, "Unpair (%s) " MACSTR " (%s)", reason, MAC2STR(dev->mac), dev->name);
+    ESP_LOGI(TAG, "Unpair (%s) dev %p " MACSTR " (%s)", reason, dev, MAC2STR(dev->mac), dev->name);
+    print_current_backtrace();
     MACAddr mac;
     memcpy(mac,dev->mac, sizeof (mac));
     memset(dev->name, 0, sizeof(dev->name));
@@ -740,8 +741,8 @@ class ConfigPortal : public HttpGetHandler {
 };
 
 extern "C" void app_main(void) {
-//  esp_log_level_set(TAG, ESP_LOG_INFO);
-  esp_log_level_set("*", ESP_LOG_INFO);
+  esp_log_level_set(TAG, ESP_LOG_INFO);
+//  esp_log_level_set("*", ESP_LOG_INFO);
 
   // Initialize NVS
   esp_err_t ret = nvs_flash_init();
@@ -944,10 +945,9 @@ extern "C" void app_main(void) {
       Locked device(devices);
       auto now = esp_log_timestamp();
       for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
-        auto dev = device[i];
-        if (dev.name[0] && (signed)(now - dev.lastSeen) > DEVICE_TIMEOUT) {
-          ESP_LOGI(TAG, "Device %s timed out", dev.name);
-          unpairDevice(&dev, "time out");
+        auto dev = &device[i];
+        if (dev->name[0] && (dev->lastSeen == 0 || (signed)(now - dev->lastSeen) > DEVICE_TIMEOUT)) {
+          unpairDevice(dev, "time out");
           hubStatusChanged = true;
         }
       }
