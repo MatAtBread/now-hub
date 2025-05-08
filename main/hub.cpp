@@ -102,7 +102,6 @@ static device_t* findDeviceName(Locked<device_table_t>& device, const char *name
 static void unpairDevice(device_t *dev, const char *reason) {
   if (dev != NULL) {
     ESP_LOGI(TAG, "Unpair (%s) dev %p " MACSTR " (%s)", reason, dev, MAC2STR(dev->mac), dev->name);
-    print_current_backtrace();
     MACAddr mac;
     memcpy(mac,dev->mac, sizeof (mac));
     memset(dev->name, 0, sizeof(dev->name));
