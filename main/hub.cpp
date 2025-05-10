@@ -26,17 +26,15 @@ const char *MQTT_TOPIC = "FreeHouse";
 #define IO_LED_B 5
 #define IO_BUTTON 9
 
-#define DEVICE_TIMEOUT 60 * 60 *1000UL  // 1 hour
+#define DEVICE_TIMEOUT 20 * 60 *1000UL  // 20 mins
+#define PAIR_TIMEOUT 2 * 60 *1000UL  // 2 mins
+
 #define MQTT_BUFFER_SIZE  8192
-#define MQTT_LATENCY      100 // A guess at how many ms it takes for a hubStatus message to get through the MQTT broker. It is wrong a second run should pick it up
-
-//#define MACSTR "%02X:%02X:%02X:%02X:%02X:%02X"
-//#define MAC2STR(mac) mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
-
-#define RETAIN 1
+// A guess at how many ms it takes for a hubStatus message to get through the MQTT broker. It is wrong a second run should pick it up. Note that testing indicates it's highly variable, from 50ms to 900ms sometimes.
+#define MQTT_LATENCY      1000
 
 const char *TAG = "ESPNOW-HUB";
-static const char PAIR_DELIM[] = ":\x1D"; // TODO: Remove the colon once all devices are updated
+static const char PAIR_DELIM[] = "\x1D"; // TODO: Remove the colon once all devices are updated
 
 /*
 ESP-NOW messages are strings:
@@ -58,8 +56,11 @@ typedef struct {
   device_name_t name;
   char *info;
   int peerRssi;
+  bool sentMerged;      // True if we previously received a retained set message which needs removal once delivered
   std::string pending;  // Accumulated JSON for any messages that failed to arrive at the destination device, to be sent on the next connection
-  uint32_t lastSeen;    // Timestamp (esp_log time) we last saw this device, or 0 to mark it as needing to be unpaired
+  uint32_t lastSeen;    // Timestamp (esp_log time) we last saw data from this device.
+  uint32_t ttl;         // Time we should consider this device absent. See DEVICE_TIMEOUT and PAIR_TIMEOUT
+  bool unpair;          // Set to indicate we should be unpaired with this device
 } device_t;
 
 typedef device_t device_table_t[ESP_NOW_MAX_TOTAL_PEER_NUM];
@@ -99,25 +100,6 @@ static device_t* findDeviceName(Locked<device_table_t>& device, const char *name
   return NULL;
 }
 
-static void unpairDevice(device_t *dev, const char *reason) {
-  if (dev != NULL) {
-    ESP_LOGI(TAG, "Unpair (%s) dev %p " MACSTR " (%s)", reason, dev, MAC2STR(dev->mac), dev->name);
-    MACAddr mac;
-    memcpy(mac,dev->mac, sizeof (mac));
-    memset(dev->name, 0, sizeof(dev->name));
-    memset(dev->mac, 0, sizeof(dev->mac));
-    dev->pending = "";
-    dev->lastSeen = 0;
-    dev->peerRssi = 0;
-
-    if (dev->info) free(dev->info);
-    dev->info = NULL;
-    if (esp_now_is_peer_exist(mac)) {
-      esp_now_del_peer(mac);
-    }
-  }
-}
-
 static std::string metaJson(const device_t *dev) {
   std::stringstream s;
   char mac[20];
@@ -139,7 +121,7 @@ static std::string hubStatusJson(Locked<device_table_t> &device) {
   s << "[";
   for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
     const device_t* dev = &device[i];
-    if (dev->lastSeen && dev->name[0]) {
+    if (!dev->unpair && dev->name[0]) {
       if (comma) s << ",";
       comma = true;
       s << metaJson(dev);
@@ -228,7 +210,7 @@ static void checkPromiscuousDevices(Locked<device_table_t> &device,  const char 
             macFromHex12(mac->valuestring, devMac, true);
             // If we know about this device, and saw it **from another hub** more recently than we did, unpair it by forcing the local lastSeen to 0
             auto dev = findDeviceMac(device, devMac);
-            if (dev != NULL && dev->lastSeen && lastSeen->valueint + MQTT_LATENCY < (now - dev->lastSeen) && strcmp(hub_ip, hub->valuestring) != 0) {
+            if (dev != NULL && dev->lastSeen && !dev->unpair && lastSeen->valueint + MQTT_LATENCY < (now - dev->lastSeen) && strcmp(hub_ip, hub->valuestring) != 0) {
               ESP_LOGI(TAG, "Device %s (%s, " MACSTR ") was seen on hub %.80s (we are %s) %dms ago. We saw it %lums ago",
                 name ? name->valuestring : "?",
                 mac->valuestring, MAC2STR(devMac),
@@ -236,7 +218,7 @@ static void checkPromiscuousDevices(Locked<device_table_t> &device,  const char 
                 lastSeen->valueint + MQTT_LATENCY,
                 now - dev->lastSeen
               );
-              dev->lastSeen = 0; // This will make it look like this device has been offline for ages
+              dev->unpair = true;
             }
           } else {
             ESP_LOGI(TAG, "checkPromiscuousDevices missing mac/hub/lastSeen: 0x%x 0x%x 0x%x", mac ? mac->type : cJSON_Invalid, hub ? hub->type : cJSON_Invalid, lastSeen ? lastSeen->type : cJSON_Invalid);
@@ -255,22 +237,22 @@ static void checkPromiscuousDevices(Locked<device_table_t> &device,  const char 
   }
 }
 
-static void mergeAndSendPending(device_t *device, const char *str) {
+static bool mergeAndSendPending(device_t *device, const char *str) {
   // Check if the device index is valid
   if (device == NULL) {
     ESP_LOGE(TAG, "Invalid device index");
-    return;
+    return false;
   }
 
   if (!memcmp(noDevice, device->mac, sizeof(noDevice))) {
     ESP_LOGE(TAG, "Invalid device mac: " MACSTR, MAC2STR(device->mac));
-    return;
+    return false;
   }
 
   // Check if the pending string is not empty
   if (!str || strlen(str) == 0) {
     ESP_LOGE(TAG, "Empty pending string");
-    return;
+    return false;
   }
 
   // Check if the device has a pending message
@@ -293,6 +275,7 @@ static void mergeAndSendPending(device_t *device, const char *str) {
 
   ESP_LOGD(TAG, "Send " MACSTR " pending (merge)", MAC2STR(device->mac));
   esp_now_send(device->mac, (const uint8_t *)device->pending.c_str(), device->pending.length() + 1);
+  return true;
 }
 
 static int mqtt_client_publish(esp_mqtt_client_handle_t client, const char *topic, const char *data, int len, int qos, int retain) {
@@ -338,11 +321,17 @@ static void mqtt_event_handler(void *args, esp_event_base_t base,
           ESP_LOGV(TAG, "Ignore hub mqtt message %s/%s/%s", root ? root : "?", name ? name : "?", subtopic ? subtopic : "?");
         } else {
           if (event->data_len >= ESP_NOW_MAX_DATA_LEN_V2) {
-            ESP_LOGI(TAG, "Too much data for esp-now v2: %s %s", name, event->data);
-          } else {
+            ESP_LOGI(TAG, "Too much data for esp-now v2: %s %80s", name, event->data);
+          } else if (event->data_len) {
             auto str = std::string(event->data, event->data_len);
-            mergeAndSendPending(dev, str.c_str());
+            if (mergeAndSendPending(dev, str.c_str())) {
+              dev->sentMerged = true;
+              //ESP_LOGI(TAG, "Sent merged message to %.*s", event->topic_len, event->topic);
+            }
           }
+          // else {
+          //   ESP_LOGI(TAG, "Delete topic %.*s", event->topic_len, event->topic);
+          // }
         }
       }
       free(topic);
@@ -371,7 +360,7 @@ static void sendNACK(const uint8_t *mac_addr) {
 
     esp_now_add_peer(&peer);
   }
-  ESP_LOGD(TAG, "Send " MACSTR " NACK", MAC2STR(mac_addr));
+  ESP_LOGI(TAG, "Send " MACSTR " NACK", MAC2STR(mac_addr));
   // vTaskDelay(50 / portTICK_PERIOD_MS); // We need to delay otherwise we delete the peer too quickly. [upd: just let it fail]
   esp_now_send(mac_addr, (uint8_t *)NACK, sizeof(NACK));
   esp_now_del_peer(mac_addr);
@@ -417,6 +406,7 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
     if (dev != NULL) {
       dev->peerRssi = esp_now_info->rx_ctrl->rssi;
       dev->lastSeen = esp_log_timestamp();
+      dev->ttl = dev->lastSeen + PAIR_TIMEOUT;
       char *name = bufAs0TermString(data + 4, len - 4);
       ESP_LOGD(TAG, "PAIR " MACSTR ": %s", MAC2STR(esp_now_info->src_addr), name);
       strtok(name, PAIR_DELIM);
@@ -447,20 +437,13 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
       ESP_LOGD(TAG, "Send " MACSTR " PACK", MAC2STR(esp_now_info->src_addr));
       esp_now_send(esp_now_info->src_addr, (const uint8_t *)PACK, sizeof(PACK));
       hubStatusChanged = true;
-      // std::string json;
-      // {
-      //   Locked device(devices);
-      //   json = hubStatusJson(device);
-      // }
-      // mqtt_client_publish(mqtt_client, MQTT_TOPIC, json.c_str(), 0, 1, RETAIN);
     } else {
       ESP_LOGE(TAG, "No device space for pairing %s " MACSTR, data + 4, MAC2STR(esp_now_info->src_addr));
       sendNACK(esp_now_info->src_addr);
     }
   } else if ((*(const uint32_t *)data) == NACK[0]) {
     if (dev != NULL) {
-      dev->lastSeen = 0; // Mark for unpairing
-      //unpairDevice(dev, "NACK");
+      dev->unpair = true;
     } else {
       ESP_LOGI(TAG, "NACK from unknown device " MACSTR, MAC2STR(esp_now_info->src_addr));
     }
@@ -469,6 +452,7 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
     if (dev != NULL) {
       dev->peerRssi = esp_now_info->rx_ctrl->rssi;
       dev->lastSeen = esp_log_timestamp();
+      dev->ttl = dev->lastSeen + DEVICE_TIMEOUT;
 
       std::string topic = MQTT_TOPIC;
       topic += "/";
@@ -481,16 +465,15 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
         cJSON *meta = cJSON_Parse(metaJson(dev).c_str());
         cJSON_AddItemToObject(payload, "meta", meta);
         const auto jsonBuf = cJSON_PrintUnformatted(payload);
-        mqtt_client_publish(mqtt_client, topic.c_str(), jsonBuf, 0, 1, RETAIN);
-        free(jsonBuf);
         cJSON_Delete(payload);
+        mqtt_client_publish(mqtt_client, topic.c_str(), jsonBuf, 0, 1, 1);
+        free(jsonBuf);
+        if (dev->sentMerged) {
+          topic += "/set";
+          // ESP_LOGI(TAG, "Delete MQTT %s message now it has processed by the end device", topic.c_str());
+          mqtt_client_publish(mqtt_client, topic.c_str(), NULL, 0, 1, 0);
+        }
         hubStatusChanged = true;
-        // std::string json;
-        // {
-        //   Locked device(devices);
-        //   json = hubStatusJson(device);
-        // }
-        // mqtt_client_publish(mqtt_client, MQTT_TOPIC, json.c_str(), 0, 1, RETAIN);
       } else {
         ESP_LOGW(TAG, "Failed to parse JSON: %*.s", len, data);
       }
@@ -606,7 +589,7 @@ class ConfigPortal : public HttpGetHandler {
       auto dev = findDeviceMac(device, mac);
       if (dev != NULL) {
         sendNACK(mac);
-        dev->lastSeen = 0; // Mark for unpairing
+        dev->unpair = true;
         //unpairDevice(dev, "user request");
         httpd_resp_set_status(req, "302 Temporary Redirect");
         // Redirect to the "/" anyGet directory
@@ -697,7 +680,7 @@ class ConfigPortal : public HttpGetHandler {
     {
       Locked device(devices);
       for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
-        if (device[i].name[0]) {
+        if (device[i].name[0] && !device[i].unpair) {
           char mac[20];
           sprintf(mac, "%02x%02x%02x%02x%02x%02x", MAC2STR(device[i].mac));
           html << "<tr>"
@@ -945,10 +928,28 @@ extern "C" void app_main(void) {
       auto now = esp_log_timestamp();
       for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
         auto dev = &device[i];
-        if (dev->name[0] && (dev->lastSeen == 0 || (signed)(now - dev->lastSeen) > DEVICE_TIMEOUT)) {
-          unpairDevice(dev, "time out");
-          hubStatusChanged = true;
+        if (dev->name[0] && (dev->unpair || (dev->ttl && now > dev->ttl))) {
+          ESP_LOGI(TAG, "Unpair %s " MACSTR " (%lu > %lu)", dev->name, MAC2STR(dev->mac), now, dev->ttl);
+          MACAddr mac;
+          memcpy(mac,dev->mac, sizeof (mac));
+
+          memset(dev->name, 0, sizeof(dev->name));
+          memset(dev->mac, 0, sizeof(dev->mac));
+          dev->pending = "";
+          dev->lastSeen = 0;
+          dev->ttl = 0;
+          dev->unpair = false;
+          dev->peerRssi = 0;
+          dev->sentMerged = false;
+
+          if (dev->info) free(dev->info);
+          dev->info = NULL;
+
+          if (esp_now_is_peer_exist(mac)) {
+            esp_now_del_peer(mac);
+          }
         }
+        hubStatusChanged = true;
       }
       if (hubStatusChanged) {
         json = hubStatusJson(device);
