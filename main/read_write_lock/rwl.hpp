@@ -56,8 +56,8 @@ class SerializedStatic {
  public:
   SerializedStatic(T& obj) : obj(obj) {
     xRecursiveMutex = xSemaphoreCreateRecursiveMutex();
-    ESP_LOGI(TAG, "Test backtrace....");
-    print_current_backtrace();
+    // ESP_LOGI(TAG, "Test backtrace....");
+    // print_current_backtrace();
   }
   ~SerializedStatic() {
     vSemaphoreDelete(xRecursiveMutex);

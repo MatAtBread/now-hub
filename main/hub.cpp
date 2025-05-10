@@ -36,13 +36,13 @@ const char *MQTT_TOPIC = "FreeHouse";
 #define RETAIN 1
 
 const char *TAG = "ESPNOW-HUB";
-static const char PAIR_DELIM[] = ":";
+static const char PAIR_DELIM[] = ":\x1D"; // TODO: Remove the colon once all devices are updated
 
 /*
 ESP-NOW messages are strings:
-    PAIRname:topic:info  Pair the source MAC with the specified NAME, supporting the specified fields in JSON. This is broadcast from the end device and processed by the hub. The :INFO is optional an informational, like a User Agent
-    PACK                Sent in response to a PAIR message, confirms the pairing allowing the client to pair with the hub
-    {json}              Sent from MQTT broker to end-device and from end-device to MQTT broker. Validation is done by the end-device and/or the broker. This hub doesn't validate the date
+    PAIRname\x1Dtopic\x1Dinfo Pair the source MAC with the specified NAME, supporting the specified fields in JSON. This is broadcast from the end device and processed by the hub. The :INFO is optional an informational, like a User Agent
+    PACK                      Sent in response to a PAIR message, confirms the pairing allowing the client to pair with the hub
+    {json}                    Sent from MQTT broker to end-device and from end-device to MQTT broker. Validation is done by the end-device and/or the broker. This hub doesn't validate the date
 
 MQTT topics:
     FreeHouse/NAME          The state of the device: a message forwarded by the hub from the esp-now device to the MQTT broker (ie hub RX, )
