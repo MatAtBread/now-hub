@@ -60,7 +60,7 @@ typedef struct {
   std::string pending;  // Accumulated JSON for any messages that failed to arrive at the destination device, to be sent on the next connection
   uint32_t lastSeen;    // Timestamp (esp_log time) we last saw data from this device.
   uint32_t ttl;         // Time we should consider this device absent. See DEVICE_TIMEOUT and PAIR_TIMEOUT
-  bool unpair;          // Set to indicate we should be unpaired with this device
+  bool unpair;          // Set to indicate we should be unpaired with this device. When true, we send a NACK in response to any msgs from the device causing it to try to re-pair. We also set the TTL in case the device is just dead.
 } device_t;
 
 typedef device_t device_table_t[ESP_NOW_MAX_TOTAL_PEER_NUM];
@@ -219,6 +219,7 @@ static void checkPromiscuousDevices(Locked<device_table_t> &device,  const char 
                 now - dev->lastSeen
               );
               dev->unpair = true;
+              dev->ttl = esp_log_timestamp() + PAIR_TIMEOUT;
             }
           } else {
             ESP_LOGI(TAG, "checkPromiscuousDevices missing mac/hub/lastSeen: 0x%x 0x%x 0x%x", mac ? mac->type : cJSON_Invalid, hub ? hub->type : cJSON_Invalid, lastSeen ? lastSeen->type : cJSON_Invalid);
@@ -351,6 +352,7 @@ static uint32_t PAIR[] = {*((const uint32_t *)"PAIR"), 0};
 static uint32_t PACK[] = {*((const uint32_t *)"PACK"), 0};
 static uint32_t NACK[] = {*((const uint32_t *)"NACK"), 0};
 
+/* Should only be called from within espnow_recv_cb() since we know the device is online and so there's a good chance it'll be received */
 static void sendNACK(const uint8_t *mac_addr) {
   if (!esp_now_is_peer_exist(mac_addr)) {
     esp_now_peer_info_t peer;
@@ -404,6 +406,11 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
     }
 
     if (dev != NULL) {
+      if (dev->unpair) {
+        sendNACK(dev->mac);
+        dev->ttl = 1; // Timeout on next attempt
+        return;
+      }
       dev->peerRssi = esp_now_info->rx_ctrl->rssi;
       dev->lastSeen = esp_log_timestamp();
       dev->ttl = dev->lastSeen + PAIR_TIMEOUT;
@@ -444,6 +451,7 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
   } else if ((*(const uint32_t *)data) == NACK[0]) {
     if (dev != NULL) {
       dev->unpair = true;
+      dev->ttl = 1; // Timeout on next pass
     } else {
       ESP_LOGI(TAG, "NACK from unknown device " MACSTR, MAC2STR(esp_now_info->src_addr));
     }
@@ -476,6 +484,11 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
         hubStatusChanged = true;
       } else {
         ESP_LOGW(TAG, "Failed to parse JSON: %*.s", len, data);
+      }
+      if (dev->unpair) {
+        sendNACK(dev->mac);
+        dev->ttl = 1; // Timeout on next attempt
+        return;
       }
     } else {
       ESP_LOGI(TAG, "NACK data from unknown device " MACSTR " %.*s", MAC2STR(esp_now_info->src_addr), len, data);
@@ -588,8 +601,8 @@ class ConfigPortal : public HttpGetHandler {
       Locked device(devices);
       auto dev = findDeviceMac(device, mac);
       if (dev != NULL) {
-        sendNACK(mac);
         dev->unpair = true;
+        dev->ttl = esp_log_timestamp() + PAIR_TIMEOUT;
         //unpairDevice(dev, "user request");
         httpd_resp_set_status(req, "302 Temporary Redirect");
         // Redirect to the "/" anyGet directory
@@ -680,17 +693,19 @@ class ConfigPortal : public HttpGetHandler {
     {
       Locked device(devices);
       for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
-        if (device[i].name[0] && !device[i].unpair) {
+        if (device[i].name[0]) {
           char mac[20];
           sprintf(mac, "%02x%02x%02x%02x%02x%02x", MAC2STR(device[i].mac));
-          html << "<tr>"
-            "<td><button onclick='window.location.href = \"/unpair/" << mac << "\"'>&#128465;</button></td>"
-            "<td>" << device[i].name << "</td>"
+          html << "<tr><td>";
+          if (!device[i].unpair)
+            html << "<button onclick='window.location.href = \"/unpair/" << mac << "\"'>&#128465;</button>";
+
+          html << "</td><td>" << device[i].name << "</td>"
             "<td><script>document.currentScript.replaceWith(" << (device[i].info ? device[i].info : "{ model:'?'}") << ".model)</script>" << "</td>"
             "<td><script>document.currentScript.replaceWith(new Date(Date.now()-" << (signed)(now - device[i].lastSeen) << ").toLocaleString())</script></td>"
             "<td>" << device[i].peerRssi << "</td>"
             "<td><script>document.currentScript.replaceWith(" << (device[i].info ? device[i].info : "{ build:'?'}") << ".build)</script>" << "</td>"
-            "<td><button onclick='window.location.href = \"/otaupdate/" << mac << "\"'>&#128428;</button></td>"
+            "<td><button onclick='window.location.href = \"/otaupdate/" << mac << "\"'>&#x2913;</button></td>"
             "</tr>";
         }
       }
@@ -928,7 +943,7 @@ extern "C" void app_main(void) {
       auto now = esp_log_timestamp();
       for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
         auto dev = &device[i];
-        if (dev->name[0] && (dev->unpair || (dev->ttl && now > dev->ttl))) {
+        if (dev->name[0] && (dev->ttl && now > dev->ttl)) {
           ESP_LOGI(TAG, "Unpair %s " MACSTR " (%lu > %lu)", dev->name, MAC2STR(dev->mac), now, dev->ttl);
           MACAddr mac;
           memcpy(mac,dev->mac, sizeof (mac));
