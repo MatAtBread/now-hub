@@ -218,8 +218,9 @@ static void checkPromiscuousDevices(Locked<device_table_t> &device,  const char 
                 lastSeen->valueint + MQTT_LATENCY,
                 now - dev->lastSeen
               );
+              // This device has already connected to a different hub - remove on the next pass without sending a NACK
               dev->unpair = true;
-              dev->ttl = esp_log_timestamp() + PAIR_TIMEOUT;
+              dev->ttl = 1;
             }
           } else {
             ESP_LOGI(TAG, "checkPromiscuousDevices missing mac/hub/lastSeen: 0x%x 0x%x 0x%x", mac ? mac->type : cJSON_Invalid, hub ? hub->type : cJSON_Invalid, lastSeen ? lastSeen->type : cJSON_Invalid);
