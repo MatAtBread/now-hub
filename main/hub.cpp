@@ -652,6 +652,10 @@ class ConfigPortal : public HttpGetHandler {
             "<script>"
 
             MULTILINE_STRING(
+            function action(url) {
+              fetch(url).finally(()=>window.location.href = window.location.href);
+            }
+
             function ota_upload(elt) {
               elt.disabled = true;
               const input = document.getElementById('firmware');
@@ -699,14 +703,14 @@ class ConfigPortal : public HttpGetHandler {
           sprintf(mac, "%02x%02x%02x%02x%02x%02x", MAC2STR(device[i].mac));
           html << "<tr><td>";
           if (!device[i].unpair)
-            html << "<button onclick='window.location.href = \"/unpair/" << mac << "\"'>&#128465;</button>";
+            html << "<button onclick='action(\"/unpair/" << mac << "\")'>&#128465;</button>";
 
           html << "</td><td>" << device[i].name << "</td>"
             "<td><script>document.currentScript.replaceWith(" << (device[i].info ? device[i].info : "{ model:'?'}") << ".model)</script>" << "</td>"
             "<td><script>document.currentScript.replaceWith(new Date(Date.now()-" << (signed)(now - device[i].lastSeen) << ").toLocaleString())</script></td>"
             "<td>" << device[i].peerRssi << "</td>"
             "<td><script>document.currentScript.replaceWith(" << (device[i].info ? device[i].info : "{ build:'?'}") << ".build)</script>" << "</td>"
-            "<td><button onclick='window.location.href = \"/otaupdate/" << mac << "\"'>&#x2913;</button></td>"
+            "<td><button onclick='action(\"/otaupdate/" << mac << "\")'>&#x2913;</button></td>"
             "</tr>";
         }
       }
@@ -719,8 +723,8 @@ class ConfigPortal : public HttpGetHandler {
             "<tr><td>WiFi password</td><td><input id='pwd' value='" << sta.password << "'></td></tr>"
             "<tr><td>MQTT server</td><td><input id='mqtt' value='" << mqtt_server << "'></td></tr>"
             "</table>"
-            "<button onclick='window.location.href = \"/set-wifi/\"+encodeURIComponent(\"ssid,pwd,mqtt\".split(\",\").map(id => document.getElementById(id).value).join(\"-\"))'>Save</button>"
-            "<button onclick='window.location.href = \"/close/\"'>"<< (withClose ? "Close" : "Restart") << "</button>"
+            "<button onclick='action(\"/set-wifi/\"+encodeURIComponent(\"ssid,pwd,mqtt\".split(\",\").map(id => document.getElementById(id).value).join(\"-\")))'>Save</button>"
+            "<button onclick='action(\"/close/\")'>" << (withClose ? "Close" : "Restart") << "</button>"
             "<h2>OTA Update</h2>"
             "<div>"
             "  <input type='file' id='firmware'>"
