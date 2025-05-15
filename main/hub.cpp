@@ -3,6 +3,7 @@
 #include <sstream>
 #include <string>
 
+#include "../common/encryption/encryption.h"
 #include "../common/captiveportal/wifi-captiveportal.h"
 #include "../common/gpio/gpio.hpp"
 #include "./read_write_lock/rwl.hpp"
@@ -42,6 +43,9 @@ ESP-NOW messages are strings:
     PACK                      Sent in response to a PAIR message, confirms the pairing allowing the client to pair with the hub
     {json}                    Sent from MQTT broker to end-device and from end-device to MQTT broker. Validation is done by the end-device and/or the broker. This hub doesn't validate the date
 
+    JOIN                      ...identical to PAIR, to encrypted with a pre-shared pass key
+
+
 MQTT topics:
     FreeHouse/NAME          The state of the device: a message forwarded by the hub from the esp-now device to the MQTT broker (ie hub RX, )
     FreeHouse/NAME/set      Data message sent by other devices to the hub, destined for the esp-now device with the specified NAME. Note: multiple messages are shallow merged until they are delivered.
@@ -68,6 +72,8 @@ static SerializedStatic<device_table_t>* devices;
 static bool hubStatusChanged = false;
 
 static MACAddr noDevice = {0, 0, 0, 0, 0, 0};
+
+static ENCRYPTION_KEY passKey;
 
 static esp_mqtt_client_handle_t mqtt_client;
 static uint8_t gateway_mac[6] = {0};
@@ -350,6 +356,7 @@ static void mqtt_event_handler(void *args, esp_event_base_t base,
 }
 
 static uint32_t PAIR[] = {*((const uint32_t *)"PAIR"), 0};
+static uint32_t JOIN[] = {*((const uint32_t *)"JOIN"), 0};
 static uint32_t PACK[] = {*((const uint32_t *)"PACK"), 0};
 static uint32_t NACK[] = {*((const uint32_t *)"NACK"), 0};
 
@@ -386,21 +393,14 @@ static void espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status
   }
 }
 
-static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_t *data, int len) {
-  device_t *dev;
-  {
-    Locked device(devices);
-    dev = findDeviceMac(device, esp_now_info->src_addr);
-  }
-
-  if ((*(const uint32_t *)data) == PAIR[0]) {
+static device_t *doPairing(device_t *dev, const esp_now_recv_info_t *esp_now_info, const uint8_t *data, int len) {
     // This is a request to pair
     if (dev == NULL) {
       Locked device(devices);
       for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
         if (!memcmp(noDevice, device[i].mac, sizeof(noDevice))) {
           dev = &device[i];
-          ESP_LOGI(TAG, "Assign " MACSTR " to slot %d [%.*s]", MAC2STR(esp_now_info->src_addr), i, len - 4, data + 4);
+          ESP_LOGI(TAG, "Assign " MACSTR " to slot %d [%.*s]", MAC2STR(esp_now_info->src_addr), i, len, data);
           break;
         }
       }
@@ -410,19 +410,19 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
       if (dev->unpair) {
         sendNACK(dev->mac);
         dev->ttl = 1; // Timeout on next attempt
-        return;
+        return dev;
       }
       dev->peerRssi = esp_now_info->rx_ctrl->rssi;
       dev->lastSeen = esp_log_timestamp();
       dev->ttl = dev->lastSeen + PAIR_TIMEOUT;
-      char *name = bufAs0TermString(data + 4, len - 4);
+      char *name = bufAs0TermString(data, len);
       ESP_LOGD(TAG, "PAIR " MACSTR ": %s", MAC2STR(esp_now_info->src_addr), name);
       strtok(name, PAIR_DELIM);
       char *hub = strtok(NULL, PAIR_DELIM);
       if (!hub || strcmp(hub, MQTT_TOPIC)) {
         // Pairing request was meant for a different network
         free(name);
-        return;
+        return dev;
       }
       char *info = strtok(NULL, "");
       if (info) {
@@ -446,10 +446,32 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
       esp_now_send(esp_now_info->src_addr, (const uint8_t *)PACK, sizeof(PACK));
       hubStatusChanged = true;
     } else {
-      ESP_LOGE(TAG, "No device space for pairing %s " MACSTR, data + 4, MAC2STR(esp_now_info->src_addr));
+      ESP_LOGE(TAG, "No device space for pairing %s " MACSTR, data, MAC2STR(esp_now_info->src_addr));
       sendNACK(esp_now_info->src_addr);
     }
-  } else if ((*(const uint32_t *)data) == NACK[0]) {
+    return dev;
+}
+
+static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_t *data, int len) {
+  device_t *dev;
+  {
+    Locked device(devices);
+    dev = findDeviceMac(device, esp_now_info->src_addr);
+  }
+
+  auto verb = (*(const uint32_t *)data);
+  if (verb == JOIN[0]) {
+    char *out;
+    size_t out_len;
+    if (decrypt_bytes_with_passphrase(data + 4, len - 4, passKey, &out, &out_len) == 0) {
+      dev = doPairing(dev, esp_now_info, (const uint8_t*)out, out_len);
+      free(out);
+    } else {
+      ESP_LOGI(TAG,"JOIN failed to decrypt");
+    }
+  } else if (verb == PAIR[0]) {
+    dev = doPairing(dev, esp_now_info, data+4, len-4);
+  } else if (verb == NACK[0]) {
     if (dev != NULL) {
       dev->unpair = true;
       dev->ttl = 1; // Timeout on next pass
@@ -529,7 +551,6 @@ static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_
 
 class ConfigPortal : public HttpGetHandler {
  protected:
-  bool withClose;
   bool startsWith(const char *search, const char *match) {
     return strncmp(search, match, strlen(match)) == 0;
   }
@@ -549,24 +570,27 @@ class ConfigPortal : public HttpGetHandler {
     *buf = 0;
   }
 
+  void redirectHome(httpd_req_t *req) {
+    httpd_resp_set_status(req, "307 Temporary Redirect");
+    httpd_resp_set_hdr(req, "Location", "/");
+    httpd_resp_send(req, "Redirect", HTTPD_RESP_USE_STRLEN);
+  }
+
  public:
   wifi_sta_config_t &sta;
   char *mqtt_server;
-  bool done;
 
-  ConfigPortal(wifi_sta_config_t &sta, char *mqtt_server, bool withClose) : withClose(withClose), sta(sta), mqtt_server(mqtt_server) {
-    done = false;
+  ConfigPortal(wifi_sta_config_t &sta, char *mqtt_server) : sta(sta), mqtt_server(mqtt_server) {
   }
 
   esp_err_t getHandler(httpd_req_t *req) {
     if (startsWith(req->uri, "/close")) {
-      if (withClose) done = true;
-      else {
-        httpd_resp_set_status(req, "307 Temporary Redirect");
-        httpd_resp_set_hdr(req, "Location", "/");
-        httpd_resp_send(req, NULL, 0); // No response body needed
-        esp_restart();
-      }
+      httpd_resp_set_status(req, "307 Temporary Redirect");
+      httpd_resp_set_hdr(req, "Location", "/");
+      httpd_resp_send(req, NULL, 0); // No response body needed
+      // Delay to flush response
+      vTaskDelay(100 / portTICK_PERIOD_MS);
+      esp_restart();
     } else if (startsWith(req->uri, "/set-wifi/")) {
       char input_param[sizeof(req->uri)];
       strncpy(input_param, req->uri + 10, sizeof(req->uri));
@@ -586,15 +610,20 @@ class ConfigPortal : public HttpGetHandler {
           nvs_set_str(nvs_handle, "mqtt", mqtt_server);
           nvs_close(nvs_handle);
         }
-        if (withClose) done = true;
-        else {
-          httpd_resp_set_status(req, "307 Temporary Redirect");
-          httpd_resp_set_hdr(req, "Location", "/");
-          httpd_resp_send(req, NULL, 0); // No response body needed
-          // Delay to flush response
-          vTaskDelay(100 / portTICK_PERIOD_MS);
-          esp_restart();
+        redirectHome(req);
+        return ESP_OK;
+      }
+    } else if (startsWith(req->uri, "/set-passphrase/")) {
+      char passphrase[64];
+      unencode(passphrase, req->uri + 16, sizeof(passphrase));
+      if (strlen(passphrase) && get_key_for_passphrase(passphrase, passKey) == 0) {
+        nvs_handle_t nvs_handle;
+        if (nvs_open("storage", NVS_READWRITE, &nvs_handle) == ESP_OK) {
+          nvs_set_blob(nvs_handle, "passkey", passKey, sizeof (passKey));
+          nvs_close(nvs_handle);
         }
+        redirectHome(req);
+        return ESP_OK;
       }
     } else if (startsWith(req->uri, "/unpair/")) {
       MACAddr mac;
@@ -604,12 +633,8 @@ class ConfigPortal : public HttpGetHandler {
       if (dev != NULL) {
         dev->unpair = true;
         dev->ttl = esp_log_timestamp() + PAIR_TIMEOUT;
-        //unpairDevice(dev, "user request");
-        httpd_resp_set_status(req, "302 Temporary Redirect");
-        // Redirect to the "/" anyGet directory
-        httpd_resp_set_hdr(req, "Location", "/");
-        // iOS requires content in the response to detect a captive portal, simply redirecting is not sufficient.
-        httpd_resp_send(req, "Redirect", HTTPD_RESP_USE_STRLEN);
+        redirectHome(req);
+        return ESP_OK;
       }
     } else if (startsWith(req->uri, "/otaupdate/")) {
       MACAddr mac;
@@ -623,13 +648,9 @@ class ConfigPortal : public HttpGetHandler {
               + std::string((const char *)sta.password)
               + "\"}}";
         mergeAndSendPending(dev, otaJson.c_str());
-
-        httpd_resp_set_status(req, "302 Temporary Redirect");
-        // Redirect to the "/" anyGet directory
-        httpd_resp_set_hdr(req, "Location", "/");
-        // iOS requires content in the response to detect a captive portal, simply redirecting is not sufficient.
-        httpd_resp_send(req, "Redirect", HTTPD_RESP_USE_STRLEN);
       }
+      redirectHome(req);
+      return ESP_OK;
     } else if (strcmp(req->uri,"") && strcmp(req->uri,"/")) {
       ESP_LOGI(TAG, "Http unknown URL%s", req->uri);
       httpd_resp_set_status(req, "404 Not found");
@@ -652,6 +673,22 @@ class ConfigPortal : public HttpGetHandler {
             "<script>"
 
             MULTILINE_STRING(
+            async function setNetName(elt) {
+              elt.disabled = true;
+              const n = prompt("Enter the new FreeHouse network passphrase");
+              if (n) {
+                await fetch("/set-passphrase/"+encodeURIComponent(n));
+              }
+              elt.disabled = false;
+            }
+
+            async function setConfig(elt) {
+              elt.disabled = true;
+              const u = "/set-wifi/"+encodeURIComponent("ssid,pwd,mqtt".split(",").map(id => document.getElementById(id).value).join("-"));
+              await fetch(u);
+              elt.disabled = false;
+            }
+
             function ota_upload(elt) {
               elt.disabled = true;
               const input = document.getElementById('firmware');
@@ -684,10 +721,10 @@ class ConfigPortal : public HttpGetHandler {
             )
 
             "</script>"
-                  "</head>"
+            "</head>"
             "<body>"
             "<h1>" << hostname << " (" << hub_ip << ")</h1>"
-            "<h2>Devcies</h1>"
+            "<h2>Devcies</h2>"
             "<table>"
             "<tr><th>Unpair</th><th>Name</th><th>Model</th><th>Last seen</th><th>Rssi</th><th>Build</th><th>Update</th></tr>";
 
@@ -713,14 +750,15 @@ class ConfigPortal : public HttpGetHandler {
     }
 
     html << "</table>"
-            "<h2>Config</h1>"
+            "<h2>WiFi & MQTT</h2>"
             "<table>"
             "<tr><td>WiFi SSID</td><td><input id='ssid' value='" << sta.ssid << "'></td></tr>"
             "<tr><td>WiFi password</td><td><input id='pwd' value='" << sta.password << "'></td></tr>"
             "<tr><td>MQTT server</td><td><input id='mqtt' value='" << mqtt_server << "'></td></tr>"
             "</table>"
-            "<button onclick='window.location.href = \"/set-wifi/\"+encodeURIComponent(\"ssid,pwd,mqtt\".split(\",\").map(id => document.getElementById(id).value).join(\"-\"))'>Save</button>"
-            "<button onclick='window.location.href = \"/close/\"'>"<< (withClose ? "Close" : "Restart") << "</button>"
+            "<button onclick='setConfig(this)'>Save</button>"
+            "<button onclick='setNetName(this)'>Set FreeHouse network name</button>"
+            "<button onclick='window.location.href = \"/close/\"'>Restart</button>"
             "<h2>OTA Update</h2>"
             "<div>"
             "  <input type='file' id='firmware'>"
@@ -730,10 +768,6 @@ class ConfigPortal : public HttpGetHandler {
             "</body></html>";
 
     httpd_resp_send(req, html.str().c_str(), HTTPD_RESP_USE_STRLEN);
-
-    // if (startsWith(req->uri, "/close")) {
-    //   if (!withClose) esp_restart();
-    // }
     return ESP_OK;
   }
 };
@@ -782,7 +816,7 @@ extern "C" void app_main(void) {
     wifi_config.sta.ssid[sizeof(wifi_config.sta.ssid) - 1] = 0;
     wifi_config.sta.password[sizeof(wifi_config.sta.password) - 1] = 0;
 
-    auto portal = new ConfigPortal(wifi_config.sta, mqtt_uri, true);
+    auto portal = new ConfigPortal(wifi_config.sta, mqtt_uri);
     start_captive_portal(portal, "FreeHouse-HUB");
 
     bool led = true;
@@ -794,15 +828,25 @@ extern "C" void app_main(void) {
       GPIO::digitalWrite(IO_LED_G, 0);
 
       vTaskDelay(1000 / portTICK_PERIOD_MS);
-      if (portal->done) {
-        GPIO::digitalWrite(IO_LED_B, 0);
-        GPIO::digitalWrite(IO_LED_R, 0);
-        esp_restart();
-      }
+      // if (portal->done) {
+      //   GPIO::digitalWrite(IO_LED_B, 0);
+      //   GPIO::digitalWrite(IO_LED_R, 0);
+      //   esp_restart();
+      // }
     }
   }
 
-  if (nvs_handle != -1) nvs_close(nvs_handle);
+  if (nvs_handle != -1) {
+    len = sizeof (passKey);
+    if (nvs_get_blob(nvs_handle, "passkey", passKey, &len) != ESP_OK || len != sizeof (passKey)) {
+      memset(passKey,0,sizeof (passKey));
+      ESP_LOGI(TAG,"No passkey found");
+    } else {
+      ESP_LOGI(TAG,"Passkey loaded: " MACSTR, MAC2STR(passKey));
+    }
+
+    nvs_close(nvs_handle);
+  }
 
   esp_read_mac(gateway_mac, ESP_MAC_WIFI_STA);
 
@@ -898,7 +942,7 @@ extern "C" void app_main(void) {
   ESP_ERROR_CHECK_WITHOUT_ABORT(esp_mqtt_client_start(mqtt_client));
 
   // Normal mode - no captive portal
-  auto portal = new ConfigPortal(wifi_config.sta, mqtt_uri, false);
+  auto portal = new ConfigPortal(wifi_config.sta, mqtt_uri);
   start_web_server(portal);
 
   int pressed = 0;
