@@ -28,22 +28,20 @@ const char *MQTT_TOPIC = "FreeHouse";
 #define IO_BUTTON 9
 
 #define DEVICE_TIMEOUT 20 * 60 *1000UL  // 20 mins
-#define PAIR_TIMEOUT 2 * 60 *1000UL  // 2 mins
+#define JOIN_TIMEOUT 2 * 60 *1000UL  // 2 mins
 
 #define MQTT_BUFFER_SIZE  8192
 // A guess at how many ms it takes for a hubStatus message to get through the MQTT broker. It is wrong a second run should pick it up. Note that testing indicates it's highly variable, from 50ms to 900ms sometimes.
 #define MQTT_LATENCY      1000
 
 const char *TAG = "ESPNOW-HUB";
-static const char PAIR_DELIM[] = "\x1D"; // TODO: Remove the colon once all devices are updated
+static const char JOIN_DELIM[] = "\x1D"; // TODO: Remove the colon once all devices are updated
 
 /*
 ESP-NOW messages are strings:
-    PAIRname\x1Dtopic\x1Dinfo Pair the source MAC with the specified NAME, supporting the specified fields in JSON. This is broadcast from the end device and processed by the hub. The :INFO is optional an informational, like a User Agent
-    PACK                      Sent in response to a PAIR message, confirms the pairing allowing the client to pair with the hub
+    JOINname\x1Dtopic\x1Dinfo Pair the source MAC with the specified NAME, supporting the specified fields in JSON. Everything after the "JOIN" is encyrpted against the network passphrase to prevent random devices joining the hub. This is broadcast from the end device and processed by the hub. The :INFO is optional an informational, like a User Agent
+    PACK                      Sent in response to a JOIN message, confirms the pairing allowing the client to pair with the hub
     {json}                    Sent from MQTT broker to end-device and from end-device to MQTT broker. Validation is done by the end-device and/or the broker. This hub doesn't validate the date
-
-    JOIN                      ...identical to PAIR, to encrypted with a pre-shared pass key
 
 
 MQTT topics:
@@ -63,7 +61,7 @@ typedef struct {
   bool sentMerged;      // True if we previously received a retained set message which needs removal once delivered
   std::string pending;  // Accumulated JSON for any messages that failed to arrive at the destination device, to be sent on the next connection
   uint32_t lastSeen;    // Timestamp (esp_log time) we last saw data from this device.
-  uint32_t ttl;         // Time we should consider this device absent. See DEVICE_TIMEOUT and PAIR_TIMEOUT
+  uint32_t ttl;         // Time we should consider this device absent. See DEVICE_TIMEOUT and JOIN_TIMEOUT
   bool unpair;          // Set to indicate we should be unpaired with this device. When true, we send a NACK in response to any msgs from the device causing it to try to re-pair. We also set the TTL in case the device is just dead.
 } device_t;
 
@@ -355,7 +353,6 @@ static void mqtt_event_handler(void *args, esp_event_base_t base,
   }
 }
 
-static uint32_t PAIR[] = {*((const uint32_t *)"PAIR"), 0};
 static uint32_t JOIN[] = {*((const uint32_t *)"JOIN"), 0};
 static uint32_t PACK[] = {*((const uint32_t *)"PACK"), 0};
 static uint32_t NACK[] = {*((const uint32_t *)"NACK"), 0};
@@ -414,11 +411,11 @@ static device_t *doPairing(device_t *dev, const esp_now_recv_info_t *esp_now_inf
       }
       dev->peerRssi = esp_now_info->rx_ctrl->rssi;
       dev->lastSeen = esp_log_timestamp();
-      dev->ttl = dev->lastSeen + PAIR_TIMEOUT;
+      dev->ttl = dev->lastSeen + JOIN_TIMEOUT;
       char *name = bufAs0TermString(data, len);
-      ESP_LOGD(TAG, "PAIR " MACSTR ": %s", MAC2STR(esp_now_info->src_addr), name);
-      strtok(name, PAIR_DELIM);
-      char *hub = strtok(NULL, PAIR_DELIM);
+      ESP_LOGD(TAG, "JOIN " MACSTR ": %s", MAC2STR(esp_now_info->src_addr), name);
+      strtok(name, JOIN_DELIM);
+      char *hub = strtok(NULL, JOIN_DELIM);
       if (!hub || strcmp(hub, MQTT_TOPIC)) {
         // Pairing request was meant for a different network
         free(name);
@@ -469,8 +466,8 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
     } else {
       ESP_LOGI(TAG,"JOIN failed to decrypt");
     }
-  } else if (verb == PAIR[0]) {
-    dev = doPairing(dev, esp_now_info, data+4, len-4);
+  // } else if (verb == JOIN[0]) {
+  //   dev = doPairing(dev, esp_now_info, data+4, len-4);
   } else if (verb == NACK[0]) {
     if (dev != NULL) {
       dev->unpair = true;
@@ -632,7 +629,7 @@ class ConfigPortal : public HttpGetHandler {
       auto dev = findDeviceMac(device, mac);
       if (dev != NULL) {
         dev->unpair = true;
-        dev->ttl = esp_log_timestamp() + PAIR_TIMEOUT;
+        dev->ttl = esp_log_timestamp() + JOIN_TIMEOUT;
         redirectHome(req);
         return ESP_OK;
       }
