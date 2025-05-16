@@ -1005,8 +1005,8 @@ extern "C" void app_main(void) {
           if (esp_now_is_peer_exist(mac)) {
             esp_now_del_peer(mac);
           }
+          hubStatusChanged = true;
         }
-        hubStatusChanged = true;
       }
       if (hubStatusChanged) {
         json = hubStatusJson(device);
