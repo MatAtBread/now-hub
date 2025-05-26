@@ -721,7 +721,7 @@ class ConfigPortal : public HttpGetHandler {
             "</head>"
             "<body>"
             "<h1>" << hostname << " (" << hub_ip << ")</h1>"
-            "<h2>Devcies</h2>"
+            "<h2>Devices</h2>"
             "<table>"
             "<tr><th>Unpair</th><th>Name</th><th>Model</th><th>Last seen</th><th>Rssi</th><th>Build</th><th>Update</th></tr>";
 
