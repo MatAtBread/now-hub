@@ -108,18 +108,12 @@ static std::string metaJson(const device_t *dev) {
   char mac[20];
   sprintf(mac, MACSTR, MAC2STR(dev->mac));
   s << "{"
-       "\"name\":\""
-    << dev->name << "\","
-                    "\"hub\":\""
-    << hub_ip << "\","
-                 "\"mac\":\""
-    << mac << "\","
-              "\"rssi\":"
-    << dev->peerRssi << ","
-                        "\"info\":"
-    << (char *)(dev->info ? dev->info : "null") << ","
-                                                   "\"lastSeen\":"
-    << (signed)(esp_log_timestamp() - dev->lastSeen)
+    "\"name\":\"" << dev->name << "\","
+    "\"hub\":\"" << hub_ip << "\","
+    "\"mac\":\"" << mac << "\","
+    "\"rssi\":" << dev->peerRssi << ","
+    "\"info\":" << (char *)(dev->info ? dev->info : "null") << ","
+    "\"lastSeen\":" << (signed)(esp_log_timestamp() - dev->lastSeen)
     << "}";
   return s.str();
 }
@@ -130,13 +124,10 @@ static std::string hubStatusJson(Locked<device_table_t> &device) {
   char mac[20];
   snprintf(mac, sizeof(mac), MACSTR, MAC2STR(gateway_mac));
   s << "{\"hub\":\"" << hub_ip << "\","
-                                  "\"ssid\":\""
-    << wifi_config.sta.ssid << "\","
-                               "\"name\":\""
-    << hostname << "\","
-                   "\"mac\":\""
-    << mac << "\","
-              "\"devices\":[";
+      "\"ssid\":\"" << wifi_config.sta.ssid << "\","
+      "\"name\":\"" << hostname << "\","
+      "\"mac\":\"" << mac << "\","
+      "\"devices\":[";
   for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
     const device_t *dev = &device[i];
     if (!dev->unpair && dev->name[0]) {
@@ -661,7 +652,11 @@ class ConfigPortal : public HttpGetHandler {
       Locked device(devices);
       auto dev = findDeviceMac(device, mac);
       if (dev != NULL) {
-        std::string otaJson = "{\"ota\":{\"url\":\"" OTA_ROOT_URI "\",\"ssid\":\"" + std::string((const char *)sta.ssid) + "\",\"pwd\":\"" + std::string((const char *)sta.password) + "\"}}";
+        std::string otaJson = "{\"ota\":{\"url\":\"" OTA_ROOT_URI "\",\"ssid\":\""
+              + std::string((const char *)sta.ssid)
+              + "\",\"pwd\":\""
+              + std::string((const char *)sta.password)
+              + "\"}}";
         mergeAndSendPending(dev, otaJson.c_str());
       }
       redirectHome(req);
@@ -683,26 +678,28 @@ class ConfigPortal : public HttpGetHandler {
             "<head>"
             "<meta charset=\"UTF-8\">"
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-            "<title>"
-         << hostname << "</title>"
-                        "<style>* { font-family: sans-serif; } button { display: block; margin: 0.5em; }</style>"
-                        "<script>"
+            "<title>" << hostname << "</title>"
+            "<style>* { font-family: sans-serif; } button { display: block; margin: 0.5em; }</style>"
+            "<script>"
 
-        MULTILINE_STRING(async function setNetName(elt) {
+            MULTILINE_STRING(
+            async function setNetName(elt) {
               elt.disabled = true;
               const n = prompt("Enter the new FreeHouse network passphrase");
               if (n) {
                 await fetch("/set-passphrase/"+encodeURIComponent(n));
               }
-              elt.disabled = false; }
+              elt.disabled = false;
+            }
 
-                         async function setConfig(elt) {
+            async function setConfig(elt) {
               elt.disabled = true;
               const u = "/set-wifi/"+encodeURIComponent("ssid,pwd,mqtt".split(",").map(id => document.getElementById(id).value).join("-"));
               await fetch(u);
-              elt.disabled = false; }
+              elt.disabled = false;
+            }
 
-                         function ota_upload(elt) {
+            function ota_upload(elt) {
               elt.disabled = true;
               const input = document.getElementById('firmware');
               if (!input.files.length || !(input.files[0] instanceof Blob)) {
@@ -729,16 +726,17 @@ class ConfigPortal : public HttpGetHandler {
               };
 
               xhr.open('POST', '/ota', true);
-              xhr.send(file); })
+              xhr.send(file);
+            }
+            )
 
             "</script>"
             "</head>"
             "<body>"
-            "<h1>"
-         << hostname << " (" << hub_ip << ")</h1>"
-                                          "<h2>Devices</h2>"
-                                          "<table>"
-                                          "<tr><th>Unpair</th><th>Name</th><th>Model</th><th>Last seen</th><th>Rssi</th><th>Build</th><th>Update</th></tr>";
+            "<h1>" << hostname << " (" << hub_ip << ")</h1>"
+            "<h2>Devices</h2>"
+            "<table>"
+            "<tr><th>Unpair</th><th>Name</th><th>Model</th><th>Last seen</th><th>Rssi</th><th>Build</th><th>Update</th></tr>";
 
     {
       Locked device(devices);
@@ -751,16 +749,11 @@ class ConfigPortal : public HttpGetHandler {
             html << "<button onclick='action(\"/unpair/" << mac << "\")'>&#128465;</button>";
 
           html << "</td><td>" << device[i].name << "</td>"
-                                                   "<td><script>document.currentScript.replaceWith("
-               << (device[i].info ? device[i].info : "{ model:'?'}") << ".model)</script>" << "</td>"
-                                                                                              "<td><script>document.currentScript.replaceWith(new Date(Date.now()-"
-               << (signed)(now - device[i].lastSeen) << ").toLocaleString())</script></td>"
-                                                        "<td>"
-               << device[i].peerRssi << "</td>"
-                                        "<td><script>document.currentScript.replaceWith("
-               << (device[i].info ? device[i].info : "{ build:'?'}") << ".build)</script>" << "</td>"
-                                                                                              "<td><button onclick='action(\"/otaupdate/"
-               << mac << "\")'>&#x2913;</button></td>"
+            "<td><script>document.currentScript.replaceWith(" << (device[i].info ? device[i].info : "{ model:'?'}") << ".model)</script>" << "</td>"
+            "<td><script>document.currentScript.replaceWith(new Date(Date.now()-" << (signed)(now - device[i].lastSeen) << ").toLocaleString())</script></td>"
+            "<td>" << device[i].peerRssi << "</td>"
+            "<td><script>document.currentScript.replaceWith(" << (device[i].info ? device[i].info : "{ build:'?'}") << ".build)</script>" << "</td>"
+            "<td><button onclick='action(\"/otaupdate/" << mac << "\")'>&#x2913;</button></td>"
                          "</tr>";
         }
       }
@@ -769,24 +762,20 @@ class ConfigPortal : public HttpGetHandler {
     html << "</table>"
             "<h2>WiFi & MQTT</h2>"
             "<table>"
-            "<tr><td>WiFi SSID</td><td><input id='ssid' value='"
-         << sta.ssid << "'></td></tr>"
-                        "<tr><td>WiFi password</td><td><input id='pwd' value='"
-         << sta.password << "'></td></tr>"
-                            "<tr><td>MQTT server</td><td><input id='mqtt' value='"
-         << mqtt_server << "'></td></tr>"
-                           "</table>"
-                           "<button onclick='setConfig(this)'>Save</button>"
-                           "<button onclick='setNetName(this)'>Set FreeHouse network name</button>"
-                           "<button onclick='window.location.href = \"/close/\"'>Restart</button>"
-                           "<h2>OTA Update</h2>"
-                           "<div>"
-                           "  <input type='file' id='firmware'>"
-                           "  <button onclick='ota_upload(this)'>Update</button>"
-                           "</div>"
-                           "<div>Current: " BUILD_TIMESTAMP
-                           "</div>"
-                           "</body></html>";
+            "<tr><td>WiFi SSID</td><td><input id='ssid' value='" << sta.ssid << "'></td></tr>"
+            "<tr><td>WiFi password</td><td><input id='pwd' value='" << sta.password << "'></td></tr>"
+            "<tr><td>MQTT server</td><td><input id='mqtt' value='" << mqtt_server << "'></td></tr>"
+            "</table>"
+            "<button onclick='setConfig(this)'>Save</button>"
+            "<button onclick='setNetName(this)'>Set FreeHouse network name</button>"
+            "<button onclick='window.location.href = \"/close/\"'>Restart</button>"
+            "<h2>OTA Update</h2>"
+            "<div>"
+            "  <input type='file' id='firmware'>"
+            "  <button onclick='ota_upload(this)'>Update</button>"
+            "</div>"
+            "<div>Current: " BUILD_TIMESTAMP "</div>"
+            "</body></html>";
 
     httpd_resp_send(req, html.str().c_str(), HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
@@ -824,7 +813,10 @@ extern "C" void app_main(void) {
 
   nvs_handle_t nvs_handle = -1;
   char mqtt_uri[64] = {0};
-  if (nvs_open("storage", NVS_READWRITE, &nvs_handle) != ESP_OK || ((len = sizeof(wifi_config.sta.ssid)), (nvs_get_str(nvs_handle, "ssid", (char *)wifi_config.sta.ssid, &len) != ESP_OK)) || ((len = sizeof(wifi_config.sta.password)), (nvs_get_str(nvs_handle, "wifipwd", (char *)wifi_config.sta.password, &len) != ESP_OK)) || ((len = sizeof(mqtt_uri)), (nvs_get_str(nvs_handle, "mqtt", mqtt_uri, &len) != ESP_OK))) {
+  if (nvs_open("storage", NVS_READWRITE, &nvs_handle) != ESP_OK
+    || ((len = sizeof(wifi_config.sta.ssid)), (nvs_get_str(nvs_handle, "ssid", (char *)wifi_config.sta.ssid, &len) != ESP_OK))
+    || ((len = sizeof(wifi_config.sta.password)), (nvs_get_str(nvs_handle, "wifipwd", (char *)wifi_config.sta.password, &len) != ESP_OK))
+    || ((len = sizeof(mqtt_uri)), (nvs_get_str(nvs_handle, "mqtt", mqtt_uri, &len) != ESP_OK))) {
     if (nvs_handle != -1) nvs_close(nvs_handle);
 
   no_net_start_captive_portal:
