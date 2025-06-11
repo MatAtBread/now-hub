@@ -122,7 +122,13 @@ static std::string metaJson(const device_t *dev) {
 static std::string hubStatusJson(Locked<device_table_t> &device) {
   std::stringstream s;
   bool comma = false;
-  s << "[";
+  char mac[20];
+  snprintf(mac, sizeof(mac), MACSTR, MAC2STR(gateway_mac));
+  s << "{\"hub\":\"" << hub_ip << "\","
+    "\"ssid\":\"" << wifi_config.sta.ssid << "\","
+    "\"name\":\"" << hostname << "\","
+    "\"mac\":\"" << mac << "\","
+    "\"devices\":[";
   for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
     const device_t* dev = &device[i];
     if (!dev->unpair && dev->name[0]) {
@@ -132,6 +138,7 @@ static std::string hubStatusJson(Locked<device_table_t> &device) {
     }
   }
   s << "]";
+  s << "}";
   return s.str();
 }
 
@@ -194,52 +201,63 @@ cJSON *shallow_merge(const char *dest_json_str, const char *src_json_str) {
   return dest; // Return merged JSON object
 }
 
-static void checkPromiscuousDevices(Locked<device_table_t> &device,  const char *src) {
+static void enumerateDevices(Locked<device_table_t> &device, cJSON *hubMsg) {
+  cJSON *elt = NULL;
+  auto now = esp_log_timestamp();
+  cJSON_ArrayForEach(elt, hubMsg) {
+    if (cJSON_IsObject(elt)) {
+      cJSON *name = cJSON_GetObjectItem(elt, "name");
+      cJSON *hub = cJSON_GetObjectItem(elt, "hub");
+      cJSON *mac = cJSON_GetObjectItem(elt, "mac");
+      cJSON *lastSeen = cJSON_GetObjectItem(elt, "lastSeen");
+
+      // Verify both are strings before using
+      if (cJSON_IsString(hub) && cJSON_IsString(mac) && cJSON_IsNumber(lastSeen)) {
+        // If the message is NOT from us...
+        MACAddr devMac;
+        macFromHex12(mac->valuestring, devMac, true);
+        // If we know about this device, and saw it **from another hub** more recently than we did, unpair it by forcing the local lastSeen to 0
+        auto dev = findDeviceMac(device, devMac);
+        if (dev != NULL && dev->lastSeen && !dev->unpair && lastSeen->valueint + MQTT_LATENCY < (now - dev->lastSeen) && strcmp(hub_ip, hub->valuestring) != 0) {
+          ESP_LOGI(TAG, "Device %s (%s, " MACSTR ") was seen on hub %.80s (we are %s) %dms ago. We saw it %lums ago",
+                   name ? name->valuestring : "?",
+                   mac->valuestring, MAC2STR(devMac),
+                   hub->valuestring, hub_ip,
+                   lastSeen->valueint + MQTT_LATENCY,
+                   now - dev->lastSeen);
+          // This device has already connected to a different hub - remove on the next pass without sending a NACK
+          dev->unpair = true;
+          dev->ttl = 1;
+        }
+      } else {
+        ESP_LOGI(TAG, "checkPromiscuousDevices missing mac/hub/lastSeen: 0x%x 0x%x 0x%x", mac ? mac->type : cJSON_Invalid, hub ? hub->type : cJSON_Invalid, lastSeen ? lastSeen->type : cJSON_Invalid);
+      }
+    } else {
+      ESP_LOGI(TAG, "checkPromiscuousDevices not a JSON object: %.80s", elt->string);
+    }
+  }
+}
+
+static void checkPromiscuousDevices(Locked<device_table_t> &device, const char *src) {
   cJSON *hubMsg = cJSON_Parse(src);
   if (hubMsg) {
     if (cJSON_IsArray(hubMsg)) {
-      cJSON *elt = NULL;
-      auto now = esp_log_timestamp();
-      cJSON_ArrayForEach(elt, hubMsg) {
-        if (cJSON_IsObject(elt)) {
-          cJSON *name = cJSON_GetObjectItem(elt, "name");
-          cJSON *hub = cJSON_GetObjectItem(elt, "hub");
-          cJSON *mac = cJSON_GetObjectItem(elt, "mac");
-          cJSON *lastSeen = cJSON_GetObjectItem(elt, "lastSeen");
-
-          // Verify both are strings before using
-          if (cJSON_IsString(hub) && cJSON_IsString(mac) && cJSON_IsNumber(lastSeen)) {
-            // If the message is NOT from us...
-            MACAddr devMac;
-            macFromHex12(mac->valuestring, devMac, true);
-            // If we know about this device, and saw it **from another hub** more recently than we did, unpair it by forcing the local lastSeen to 0
-            auto dev = findDeviceMac(device, devMac);
-            if (dev != NULL && dev->lastSeen && !dev->unpair && lastSeen->valueint + MQTT_LATENCY < (now - dev->lastSeen) && strcmp(hub_ip, hub->valuestring) != 0) {
-              ESP_LOGI(TAG, "Device %s (%s, " MACSTR ") was seen on hub %.80s (we are %s) %dms ago. We saw it %lums ago",
-                name ? name->valuestring : "?",
-                mac->valuestring, MAC2STR(devMac),
-                hub->valuestring, hub_ip,
-                lastSeen->valueint + MQTT_LATENCY,
-                now - dev->lastSeen
-              );
-              // This device has already connected to a different hub - remove on the next pass without sending a NACK
-              dev->unpair = true;
-              dev->ttl = 1;
-            }
-          } else {
-            ESP_LOGI(TAG, "checkPromiscuousDevices missing mac/hub/lastSeen: 0x%x 0x%x 0x%x", mac ? mac->type : cJSON_Invalid, hub ? hub->type : cJSON_Invalid, lastSeen ? lastSeen->type : cJSON_Invalid);
-          }
-        } else {
-          ESP_LOGI(TAG, "checkPromiscuousDevices not a JSON object: %.80s", elt->string);
-        }
-      }
+      enumerateDevices(device, hubMsg);
     } else {
-      ESP_LOGI(TAG, "checkPromiscuousDevices not a JSON array: %.80s", src);
+      if (cJSON_IsObject(hubMsg)) {
+        auto connected = cJSON_GetObjectItem(hubMsg, "devices");
+        if (cJSON_IsArray(connected)) {
+          enumerateDevices(device, connected);
+        } else {
+          ESP_LOGW(TAG, "checkPromiscuousDevices.devices is not an array: %s", src);
+        }
+      } else {
+        ESP_LOGW(TAG, "checkPromiscuousDevices not an array or object: %s", src);
+      }
     }
     cJSON_Delete(hubMsg);
   } else {
-    ESP_LOGW(TAG, "checkPromiscuousDevices not JSON: %p", src);
-    // Dump as hex??
+    ESP_LOGW(TAG, "checkPromiscuousDevices not JSON: %s", src);
   }
 }
 
