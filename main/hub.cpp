@@ -683,6 +683,18 @@ class ConfigPortal : public HttpGetHandler {
             "<script>"
 
             MULTILINE_STRING(
+            async function action(url) {
+              fetch(url).then(response => {
+                if (!response.ok) {
+                  alert("Action failed: " + response.statusText);
+                }
+              }).catch(error => {
+                alert("Error: " + error);
+              }). finally(() => {
+                  window.location.href = "/";
+              });
+            }
+
             async function setNetName(elt) {
               elt.disabled = true;
               const n = prompt("Enter the new FreeHouse network passphrase");
@@ -754,7 +766,7 @@ class ConfigPortal : public HttpGetHandler {
             "<td>" << device[i].peerRssi << "</td>"
             "<td><script>document.currentScript.replaceWith(" << (device[i].info ? device[i].info : "{ build:'?'}") << ".build)</script>" << "</td>"
             "<td><button onclick='action(\"/otaupdate/" << mac << "\")'>&#x2913;</button></td>"
-                         "</tr>";
+            "</tr>";
         }
       }
     }
