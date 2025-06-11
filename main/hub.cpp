@@ -84,6 +84,8 @@ static wifi_config_t wifi_config = {
         .threshold = {.authmode = WIFI_AUTH_WPA2_PSK},
     }};
 
+static void sendNACK(const uint8_t *mac_addr);
+
 static device_t *findDeviceMac(Locked<device_table_t> &device, const uint8_t *mac) {
   for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
     if (memcmp(device[i].mac, mac, sizeof(device[i].mac)) == 0) {
@@ -209,24 +211,34 @@ static void enumerateDevices(Locked<device_table_t> &device, cJSON *hubMsg) {
       cJSON *hub = cJSON_GetObjectItem(elt, "hub");
       cJSON *mac = cJSON_GetObjectItem(elt, "mac");
       cJSON *lastSeen = cJSON_GetObjectItem(elt, "lastSeen");
+      cJSON *rssi = cJSON_GetObjectItem(elt, "rssi");
 
       // Verify both are strings before using
-      if (cJSON_IsString(hub) && cJSON_IsString(mac) && cJSON_IsNumber(lastSeen)) {
+      if (cJSON_IsString(hub) && cJSON_IsString(mac) && cJSON_IsNumber(lastSeen) && cJSON_IsNumber(rssi)) {
         // If the message is NOT from us...
         MACAddr devMac;
         macFromHex12(mac->valuestring, devMac, true);
         // If we know about this device, and saw it **from another hub** more recently than we did, unpair it by forcing the local lastSeen to 0
         auto dev = findDeviceMac(device, devMac);
-        if (dev != NULL && dev->lastSeen && !dev->unpair && lastSeen->valueint + MQTT_LATENCY < (now - dev->lastSeen) && strcmp(hub_ip, hub->valuestring) != 0) {
-          ESP_LOGI(TAG, "Device %s (%s, " MACSTR ") was seen on hub %.80s (we are %s) %dms ago. We saw it %lums ago",
-                   name ? name->valuestring : "?",
-                   mac->valuestring, MAC2STR(devMac),
-                   hub->valuestring, hub_ip,
-                   lastSeen->valueint + MQTT_LATENCY,
-                   now - dev->lastSeen);
-          // This device has already connected to a different hub - remove on the next pass without sending a NACK
-          dev->unpair = true;
-          dev->ttl = 1;
+        if (dev != NULL && strcmp(hub_ip, hub->valuestring) != 0) {
+          bool shouldUnpair = !dev->unpair && dev->peerRssi < rssi->valueint /*&& dev->lastSeen && lastSeen->valueint + MQTT_LATENCY < (now - dev->lastSeen)*/;
+          ESP_LOGI(TAG, "Device '%s' (%s, " MACSTR ") was seen on hub %.80s (we are %s) with rssi %d %dms ago. We saw it %lums ago with rssi of %d. %s",
+                    name ? name->valuestring : "?",
+                    mac->valuestring, MAC2STR(devMac),
+                    hub->valuestring, hub_ip,
+                    rssi->valueint,
+                    lastSeen->valueint + MQTT_LATENCY,
+                    now - dev->lastSeen,
+                    dev->peerRssi,
+                    shouldUnpair ? "Unpairing" : "Keeping"
+                  );
+          if (shouldUnpair) {
+            // This device has already connected to a different hub with a better rssi - remove on the next pass
+            sendNACK(dev->mac);
+
+            dev->unpair = true;
+            dev->ttl = 1;
+          }
         }
       } else {
         ESP_LOGI(TAG, "enumerateDevices missing mac/hub/lastSeen: 0x%x 0x%x 0x%x", mac ? mac->type : cJSON_Invalid, hub ? hub->type : cJSON_Invalid, lastSeen ? lastSeen->type : cJSON_Invalid);
@@ -477,7 +489,7 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
       dev = doPairing(dev, esp_now_info, (const uint8_t *)out, out_len);
       free(out);
     } else {
-      ESP_LOGI(TAG, "JOIN failed to decrypt");
+      ESP_LOGI(TAG, "JOIN failed to decrypt" MACSTR, MAC2STR(esp_now_info->src_addr));
     }
     // } else if (verb == JOIN[0]) {
     //   dev = doPairing(dev, esp_now_info, data+4, len-4);
