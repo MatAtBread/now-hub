@@ -3,18 +3,18 @@
 #include <sstream>
 #include <string>
 
-#include "../common/encryption/encryption.h"
 #include "../common/captiveportal/wifi-captiveportal.h"
+#include "../common/encryption/encryption.h"
 #include "../common/gpio/gpio.hpp"
 #include "./read_write_lock/rwl.hpp"
 #include "esp_log.h"
 // #include "esp_heap_trace.h"
-#include "esp_now.h"
+#include "cJSON.h"
 #include "esp_mac.h"
+#include "esp_now.h"
 #include "esp_wifi.h"
 #include "mqtt_client.h"
 #include "nvs_flash.h"
-#include "cJSON.h"
 
 #define BUILD_TIMESTAMP __DATE__ " " __TIME__
 #define MULTILINE_STRING(...) #__VA_ARGS__
@@ -27,15 +27,15 @@ const char *MQTT_TOPIC = "FreeHouse";
 #define IO_LED_B 5
 #define IO_BUTTON 9
 
-#define DEVICE_TIMEOUT 20 * 60 *1000UL  // 20 mins
-#define JOIN_TIMEOUT 2 * 60 *1000UL  // 2 mins
+#define DEVICE_TIMEOUT 20 * 60 * 1000UL  // 20 mins
+#define JOIN_TIMEOUT 2 * 60 * 1000UL     // 2 mins
 
-#define MQTT_BUFFER_SIZE  8192
+#define MQTT_BUFFER_SIZE 8192
 // A guess at how many ms it takes for a hubStatus message to get through the MQTT broker. It is wrong a second run should pick it up. Note that testing indicates it's highly variable, from 50ms to 900ms sometimes.
-#define MQTT_LATENCY      1000
+#define MQTT_LATENCY 1000
 
 const char *TAG = "ESPNOW-HUB";
-static const char JOIN_DELIM[] = "\x1D"; // TODO: Remove the colon once all devices are updated
+static const char JOIN_DELIM[] = "\x1D";  // TODO: Remove the colon once all devices are updated
 
 /*
 ESP-NOW messages are strings:
@@ -66,7 +66,7 @@ typedef struct {
 } device_t;
 
 typedef device_t device_table_t[ESP_NOW_MAX_TOTAL_PEER_NUM];
-static SerializedStatic<device_table_t>* devices;
+static SerializedStatic<device_table_t> *devices;
 static bool hubStatusChanged = false;
 
 static MACAddr noDevice = {0, 0, 0, 0, 0, 0};
@@ -78,14 +78,13 @@ static uint8_t gateway_mac[6] = {0};
 static char hub_ip[16] = {0};
 static char hostname[32] = {0};
 static wifi_config_t wifi_config = {
-  .sta = {
-      .ssid = "",
-      .password = "",
-      .threshold = {.authmode = WIFI_AUTH_WPA2_PSK},
-  }
-};
+    .sta = {
+        .ssid = "",
+        .password = "",
+        .threshold = {.authmode = WIFI_AUTH_WPA2_PSK},
+    }};
 
-static device_t *findDeviceMac(Locked<device_table_t>& device, const uint8_t *mac) {
+static device_t *findDeviceMac(Locked<device_table_t> &device, const uint8_t *mac) {
   for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
     if (memcmp(device[i].mac, mac, sizeof(device[i].mac)) == 0) {
       // ESP_LOGI(TAG, "Found device %d " MACSTR " " MACSTR, i, MAC2STR(mac), MAC2STR(mac));
@@ -95,7 +94,7 @@ static device_t *findDeviceMac(Locked<device_table_t>& device, const uint8_t *ma
   return NULL;
 }
 
-static device_t* findDeviceName(Locked<device_table_t>& device, const char *name) {
+static device_t *findDeviceName(Locked<device_table_t> &device, const char *name) {
   for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
     if (strncmp(device[i].name, name, sizeof(device_name_t)) == 0) {
       return device + i;
@@ -109,12 +108,18 @@ static std::string metaJson(const device_t *dev) {
   char mac[20];
   sprintf(mac, MACSTR, MAC2STR(dev->mac));
   s << "{"
-    "\"name\":\"" << dev->name << "\","
-    "\"hub\":\"" << hub_ip << "\","
-    "\"mac\":\"" << mac << "\","
-    "\"rssi\":" << dev->peerRssi << ","
-    "\"info\":" << (char *)(dev->info ? dev->info : "null") << ","
-    "\"lastSeen\":" << (signed)(esp_log_timestamp() - dev->lastSeen)
+       "\"name\":\""
+    << dev->name << "\","
+                    "\"hub\":\""
+    << hub_ip << "\","
+                 "\"mac\":\""
+    << mac << "\","
+              "\"rssi\":"
+    << dev->peerRssi << ","
+                        "\"info\":"
+    << (char *)(dev->info ? dev->info : "null") << ","
+                                                   "\"lastSeen\":"
+    << (signed)(esp_log_timestamp() - dev->lastSeen)
     << "}";
   return s.str();
 }
@@ -125,12 +130,15 @@ static std::string hubStatusJson(Locked<device_table_t> &device) {
   char mac[20];
   snprintf(mac, sizeof(mac), MACSTR, MAC2STR(gateway_mac));
   s << "{\"hub\":\"" << hub_ip << "\","
-    "\"ssid\":\"" << wifi_config.sta.ssid << "\","
-    "\"name\":\"" << hostname << "\","
-    "\"mac\":\"" << mac << "\","
-    "\"devices\":[";
+                                  "\"ssid\":\""
+    << wifi_config.sta.ssid << "\","
+                               "\"name\":\""
+    << hostname << "\","
+                   "\"mac\":\""
+    << mac << "\","
+              "\"devices\":[";
   for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
-    const device_t* dev = &device[i];
+    const device_t *dev = &device[i];
     if (!dev->unpair && dev->name[0]) {
       if (comma) s << ",";
       comma = true;
@@ -159,7 +167,7 @@ static uint8_t hexValue(const char c) {
 
 static void macFromHex12(const char *hex, MACAddr &mac, bool commas) {
   int step = commas ? 3 : 2;
-  memset(mac,0,sizeof (mac));
+  memset(mac, 0, sizeof(mac));
   for (int i = 0; i < 6; i++) {
     mac[i] = hexValue(hex[i * step]) * 16 + hexValue(hex[i * step + 1]);
   }
@@ -171,34 +179,34 @@ cJSON *shallow_merge(const char *dest_json_str, const char *src_json_str) {
   cJSON *src = cJSON_Parse(src_json_str);
 
   if (!dest || !src) {
-      printf("Error parsing JSON strings.\n");
-      if (dest) cJSON_Delete(dest);
-      if (src) cJSON_Delete(src);
-      return NULL;
+    printf("Error parsing JSON strings.\n");
+    if (dest) cJSON_Delete(dest);
+    if (src) cJSON_Delete(src);
+    return NULL;
   }
 
   // Iterate through keys in the source object
   cJSON *src_item = src->child;
   while (src_item) {
-      // Find the corresponding key in the destination object
-      cJSON *dest_item = cJSON_GetObjectItem(dest, src_item->string);
+    // Find the corresponding key in the destination object
+    cJSON *dest_item = cJSON_GetObjectItem(dest, src_item->string);
 
-      if (dest_item) {
-          // Replace value in destination with value from source (shallow update)
-          cJSON_ReplaceItemInObject(dest, src_item->string, cJSON_Duplicate(src_item, 1));
-      } else {
-          // Add new key-value pair to destination
-          cJSON_AddItemToObject(dest, src_item->string, cJSON_Duplicate(src_item, 1));
-      }
+    if (dest_item) {
+      // Replace value in destination with value from source (shallow update)
+      cJSON_ReplaceItemInObject(dest, src_item->string, cJSON_Duplicate(src_item, 1));
+    } else {
+      // Add new key-value pair to destination
+      cJSON_AddItemToObject(dest, src_item->string, cJSON_Duplicate(src_item, 1));
+    }
 
-      src_item = src_item->next; // Move to next key in source
+    src_item = src_item->next;  // Move to next key in source
   }
 
   // Cleanup source object
   cJSON_Delete(src);
 
   // ESP_LOGI(TAG, "Merged JSON: %s = %s + %s", cJSON_Print(dest), dest_json_str, src_json_str); // Print merged JSON for debugging
-  return dest; // Return merged JSON object
+  return dest;  // Return merged JSON object
 }
 
 static void enumerateDevices(Locked<device_table_t> &device, cJSON *hubMsg) {
@@ -230,10 +238,10 @@ static void enumerateDevices(Locked<device_table_t> &device, cJSON *hubMsg) {
           dev->ttl = 1;
         }
       } else {
-        ESP_LOGI(TAG, "checkPromiscuousDevices missing mac/hub/lastSeen: 0x%x 0x%x 0x%x", mac ? mac->type : cJSON_Invalid, hub ? hub->type : cJSON_Invalid, lastSeen ? lastSeen->type : cJSON_Invalid);
+        ESP_LOGI(TAG, "enumerateDevices missing mac/hub/lastSeen: 0x%x 0x%x 0x%x", mac ? mac->type : cJSON_Invalid, hub ? hub->type : cJSON_Invalid, lastSeen ? lastSeen->type : cJSON_Invalid);
       }
     } else {
-      ESP_LOGI(TAG, "checkPromiscuousDevices not a JSON object: %.80s", elt->string);
+      ESP_LOGI(TAG, "enumerateDevices not a JSON object: %.80s", elt->string);
     }
   }
 }
@@ -241,19 +249,15 @@ static void enumerateDevices(Locked<device_table_t> &device, cJSON *hubMsg) {
 static void checkPromiscuousDevices(Locked<device_table_t> &device, const char *src) {
   cJSON *hubMsg = cJSON_Parse(src);
   if (hubMsg) {
-    if (cJSON_IsArray(hubMsg)) {
-      enumerateDevices(device, hubMsg);
-    } else {
-      if (cJSON_IsObject(hubMsg)) {
-        auto connected = cJSON_GetObjectItem(hubMsg, "devices");
-        if (cJSON_IsArray(connected)) {
-          enumerateDevices(device, connected);
-        } else {
-          ESP_LOGW(TAG, "checkPromiscuousDevices.devices is not an array: %s", src);
-        }
+    if (cJSON_IsObject(hubMsg)) {
+      auto connected = cJSON_GetObjectItem(hubMsg, "devices");
+      if (cJSON_IsArray(connected)) {
+        enumerateDevices(device, connected);
       } else {
-        ESP_LOGW(TAG, "checkPromiscuousDevices not an array or object: %s", src);
+        ESP_LOGW(TAG, "checkPromiscuousDevices.devices is not an array: %s", src);
       }
+    } else {
+      ESP_LOGW(TAG, "checkPromiscuousDevices not an array or object: %s", src);
     }
     cJSON_Delete(hubMsg);
   } else {
@@ -305,7 +309,7 @@ static bool mergeAndSendPending(device_t *device, const char *str) {
 static int mqtt_client_publish(esp_mqtt_client_handle_t client, const char *topic, const char *data, int len, int qos, int retain) {
   auto r = esp_mqtt_client_publish(client, topic, data, len, qos, retain);
   if (r < 0) {
-    ESP_LOGW(TAG,"mqtt_client_publish %s (%d) failed with %d", topic, len, r);
+    ESP_LOGW(TAG, "mqtt_client_publish %s (%d) failed with %d", topic, len, r);
   }
   return r;
 }
@@ -335,7 +339,7 @@ static void mqtt_event_handler(void *args, esp_event_base_t base,
 
       // We ARE interested in the FreeHouse topic (with no subtop [device]) as we can listen to it, and
       // if we hear that one of our devices has attached to another hub we can unpair it
-      ESP_LOGD(TAG,"MQTT_EVENT_DATA %s (root %s, name %s, subtopic %s)", topic ? topic : "NULL", root ? root : "NULL", name ? name : "NULL", subtopic ? subtopic : "NULL");
+      ESP_LOGD(TAG, "MQTT_EVENT_DATA %s (root %s, name %s, subtopic %s)", topic ? topic : "NULL", root ? root : "NULL", name ? name : "NULL", subtopic ? subtopic : "NULL");
       if (!name && !subtopic && root && !strcmp(root, MQTT_TOPIC)) {
         // This should be JSON array in the format returned by hubStatusJson()
         auto str = std::string(event->data, event->data_len);
@@ -350,7 +354,7 @@ static void mqtt_event_handler(void *args, esp_event_base_t base,
             auto str = std::string(event->data, event->data_len);
             if (mergeAndSendPending(dev, str.c_str())) {
               dev->sentMerged = true;
-              //ESP_LOGI(TAG, "Sent merged message to %.*s", event->topic_len, event->topic);
+              // ESP_LOGI(TAG, "Sent merged message to %.*s", event->topic_len, event->topic);
             }
           }
           // else {
@@ -409,62 +413,62 @@ static void espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status
 }
 
 static device_t *doPairing(device_t *dev, const esp_now_recv_info_t *esp_now_info, const uint8_t *data, int len) {
-    // This is a request to pair
-    if (dev == NULL) {
-      Locked device(devices);
-      for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
-        if (!memcmp(noDevice, device[i].mac, sizeof(noDevice))) {
-          dev = &device[i];
-          ESP_LOGI(TAG, "Assign " MACSTR " to slot %d [%.*s]", MAC2STR(esp_now_info->src_addr), i, len, data);
-          break;
-        }
+  // This is a request to pair
+  if (dev == NULL) {
+    Locked device(devices);
+    for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
+      if (!memcmp(noDevice, device[i].mac, sizeof(noDevice))) {
+        dev = &device[i];
+        ESP_LOGI(TAG, "Assign " MACSTR " to slot %d [%.*s]", MAC2STR(esp_now_info->src_addr), i, len, data);
+        break;
       }
     }
+  }
 
-    if (dev != NULL) {
-      if (dev->unpair) {
-        sendNACK(dev->mac);
-        dev->ttl = 1; // Timeout on next attempt
-        return dev;
-      }
-      dev->peerRssi = esp_now_info->rx_ctrl->rssi;
-      dev->lastSeen = esp_log_timestamp();
-      dev->ttl = dev->lastSeen + JOIN_TIMEOUT;
-      char *name = bufAs0TermString(data, len);
-      ESP_LOGD(TAG, "JOIN " MACSTR ": %s", MAC2STR(esp_now_info->src_addr), name);
-      strtok(name, JOIN_DELIM);
-      char *hub = strtok(NULL, JOIN_DELIM);
-      if (!hub || strcmp(hub, MQTT_TOPIC)) {
-        // Pairing request was meant for a different network
-        free(name);
-        return dev;
-      }
-      char *info = strtok(NULL, "");
-      if (info) {
-        if (dev->info) free(dev->info);
-        dev->info = bufAs0TermString(info, strlen(info));
-      }
-      memcpy(dev->mac, esp_now_info->src_addr, sizeof(MACAddr));
-      strncpy(dev->name, name, sizeof(device_name_t));
+  if (dev != NULL) {
+    if (dev->unpair) {
+      sendNACK(dev->mac);
+      dev->ttl = 1;  // Timeout on next attempt
+      return dev;
+    }
+    dev->peerRssi = esp_now_info->rx_ctrl->rssi;
+    dev->lastSeen = esp_log_timestamp();
+    dev->ttl = dev->lastSeen + JOIN_TIMEOUT;
+    char *name = bufAs0TermString(data, len);
+    ESP_LOGD(TAG, "JOIN " MACSTR ": %s", MAC2STR(esp_now_info->src_addr), name);
+    strtok(name, JOIN_DELIM);
+    char *hub = strtok(NULL, JOIN_DELIM);
+    if (!hub || strcmp(hub, MQTT_TOPIC)) {
+      // Pairing request was meant for a different network
       free(name);
-
-      if (!esp_now_is_peer_exist(esp_now_info->src_addr)) {
-        esp_now_peer_info_t peer;
-        memset(&peer, 0, sizeof(peer));
-        peer.ifidx = WIFI_IF_STA;
-        memcpy(&peer.peer_addr, esp_now_info->src_addr, sizeof(MACAddr));
-
-        esp_now_add_peer(&peer);
-      }
-
-      ESP_LOGD(TAG, "Send " MACSTR " PACK", MAC2STR(esp_now_info->src_addr));
-      esp_now_send(esp_now_info->src_addr, (const uint8_t *)PACK, sizeof(PACK));
-      hubStatusChanged = true;
-    } else {
-      ESP_LOGE(TAG, "No device space for pairing %s " MACSTR, data, MAC2STR(esp_now_info->src_addr));
-      sendNACK(esp_now_info->src_addr);
+      return dev;
     }
-    return dev;
+    char *info = strtok(NULL, "");
+    if (info) {
+      if (dev->info) free(dev->info);
+      dev->info = bufAs0TermString(info, strlen(info));
+    }
+    memcpy(dev->mac, esp_now_info->src_addr, sizeof(MACAddr));
+    strncpy(dev->name, name, sizeof(device_name_t));
+    free(name);
+
+    if (!esp_now_is_peer_exist(esp_now_info->src_addr)) {
+      esp_now_peer_info_t peer;
+      memset(&peer, 0, sizeof(peer));
+      peer.ifidx = WIFI_IF_STA;
+      memcpy(&peer.peer_addr, esp_now_info->src_addr, sizeof(MACAddr));
+
+      esp_now_add_peer(&peer);
+    }
+
+    ESP_LOGD(TAG, "Send " MACSTR " PACK", MAC2STR(esp_now_info->src_addr));
+    esp_now_send(esp_now_info->src_addr, (const uint8_t *)PACK, sizeof(PACK));
+    hubStatusChanged = true;
+  } else {
+    ESP_LOGE(TAG, "No device space for pairing %s " MACSTR, data, MAC2STR(esp_now_info->src_addr));
+    sendNACK(esp_now_info->src_addr);
+  }
+  return dev;
 }
 
 static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_t *data, int len) {
@@ -479,17 +483,17 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
     char *out;
     size_t out_len;
     if (decrypt_bytes_with_passphrase(data + 4, len - 4, passKey, &out, &out_len) == 0) {
-      dev = doPairing(dev, esp_now_info, (const uint8_t*)out, out_len);
+      dev = doPairing(dev, esp_now_info, (const uint8_t *)out, out_len);
       free(out);
     } else {
-      ESP_LOGI(TAG,"JOIN failed to decrypt");
+      ESP_LOGI(TAG, "JOIN failed to decrypt");
     }
-  // } else if (verb == JOIN[0]) {
-  //   dev = doPairing(dev, esp_now_info, data+4, len-4);
+    // } else if (verb == JOIN[0]) {
+    //   dev = doPairing(dev, esp_now_info, data+4, len-4);
   } else if (verb == NACK[0]) {
     if (dev != NULL) {
       dev->unpair = true;
-      dev->ttl = 1; // Timeout on next pass
+      dev->ttl = 1;  // Timeout on next pass
     } else {
       ESP_LOGI(TAG, "NACK from unknown device " MACSTR, MAC2STR(esp_now_info->src_addr));
     }
@@ -525,7 +529,7 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
       }
       if (dev->unpair) {
         sendNACK(dev->mac);
-        dev->ttl = 1; // Timeout on next attempt
+        dev->ttl = 1;  // Timeout on next attempt
         return;
       }
     } else {
@@ -602,7 +606,7 @@ class ConfigPortal : public HttpGetHandler {
     if (startsWith(req->uri, "/close")) {
       httpd_resp_set_status(req, "307 Temporary Redirect");
       httpd_resp_set_hdr(req, "Location", "/");
-      httpd_resp_send(req, NULL, 0); // No response body needed
+      httpd_resp_send(req, NULL, 0);  // No response body needed
       // Delay to flush response
       vTaskDelay(100 / portTICK_PERIOD_MS);
       esp_restart();
@@ -634,7 +638,7 @@ class ConfigPortal : public HttpGetHandler {
       if (strlen(passphrase) && get_key_for_passphrase(passphrase, passKey) == 0) {
         nvs_handle_t nvs_handle;
         if (nvs_open("storage", NVS_READWRITE, &nvs_handle) == ESP_OK) {
-          nvs_set_blob(nvs_handle, "passkey", passKey, sizeof (passKey));
+          nvs_set_blob(nvs_handle, "passkey", passKey, sizeof(passKey));
           nvs_close(nvs_handle);
         }
         redirectHome(req);
@@ -657,16 +661,12 @@ class ConfigPortal : public HttpGetHandler {
       Locked device(devices);
       auto dev = findDeviceMac(device, mac);
       if (dev != NULL) {
-        std::string otaJson = "{\"ota\":{\"url\":\"" OTA_ROOT_URI "\",\"ssid\":\""
-              + std::string((const char *)sta.ssid)
-              + "\",\"pwd\":\""
-              + std::string((const char *)sta.password)
-              + "\"}}";
+        std::string otaJson = "{\"ota\":{\"url\":\"" OTA_ROOT_URI "\",\"ssid\":\"" + std::string((const char *)sta.ssid) + "\",\"pwd\":\"" + std::string((const char *)sta.password) + "\"}}";
         mergeAndSendPending(dev, otaJson.c_str());
       }
       redirectHome(req);
       return ESP_OK;
-    } else if (strcmp(req->uri,"") && strcmp(req->uri,"/")) {
+    } else if (strcmp(req->uri, "") && strcmp(req->uri, "/")) {
       ESP_LOGI(TAG, "Http unknown URL%s", req->uri);
       httpd_resp_set_status(req, "404 Not found");
       httpd_resp_send(req, "404 Not found", HTTPD_RESP_USE_STRLEN);
@@ -683,28 +683,26 @@ class ConfigPortal : public HttpGetHandler {
             "<head>"
             "<meta charset=\"UTF-8\">"
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-            "<title>" << hostname << "</title>"
-            "<style>* { font-family: sans-serif; } button { display: block; margin: 0.5em; }</style>"
-            "<script>"
+            "<title>"
+         << hostname << "</title>"
+                        "<style>* { font-family: sans-serif; } button { display: block; margin: 0.5em; }</style>"
+                        "<script>"
 
-            MULTILINE_STRING(
-            async function setNetName(elt) {
+        MULTILINE_STRING(async function setNetName(elt) {
               elt.disabled = true;
               const n = prompt("Enter the new FreeHouse network passphrase");
               if (n) {
                 await fetch("/set-passphrase/"+encodeURIComponent(n));
               }
-              elt.disabled = false;
-            }
+              elt.disabled = false; }
 
-            async function setConfig(elt) {
+                         async function setConfig(elt) {
               elt.disabled = true;
               const u = "/set-wifi/"+encodeURIComponent("ssid,pwd,mqtt".split(",").map(id => document.getElementById(id).value).join("-"));
               await fetch(u);
-              elt.disabled = false;
-            }
+              elt.disabled = false; }
 
-            function ota_upload(elt) {
+                         function ota_upload(elt) {
               elt.disabled = true;
               const input = document.getElementById('firmware');
               if (!input.files.length || !(input.files[0] instanceof Blob)) {
@@ -731,17 +729,16 @@ class ConfigPortal : public HttpGetHandler {
               };
 
               xhr.open('POST', '/ota', true);
-              xhr.send(file);
-            }
-            )
+              xhr.send(file); })
 
             "</script>"
             "</head>"
             "<body>"
-            "<h1>" << hostname << " (" << hub_ip << ")</h1>"
-            "<h2>Devices</h2>"
-            "<table>"
-            "<tr><th>Unpair</th><th>Name</th><th>Model</th><th>Last seen</th><th>Rssi</th><th>Build</th><th>Update</th></tr>";
+            "<h1>"
+         << hostname << " (" << hub_ip << ")</h1>"
+                                          "<h2>Devices</h2>"
+                                          "<table>"
+                                          "<tr><th>Unpair</th><th>Name</th><th>Model</th><th>Last seen</th><th>Rssi</th><th>Build</th><th>Update</th></tr>";
 
     {
       Locked device(devices);
@@ -754,12 +751,17 @@ class ConfigPortal : public HttpGetHandler {
             html << "<button onclick='action(\"/unpair/" << mac << "\")'>&#128465;</button>";
 
           html << "</td><td>" << device[i].name << "</td>"
-            "<td><script>document.currentScript.replaceWith(" << (device[i].info ? device[i].info : "{ model:'?'}") << ".model)</script>" << "</td>"
-            "<td><script>document.currentScript.replaceWith(new Date(Date.now()-" << (signed)(now - device[i].lastSeen) << ").toLocaleString())</script></td>"
-            "<td>" << device[i].peerRssi << "</td>"
-            "<td><script>document.currentScript.replaceWith(" << (device[i].info ? device[i].info : "{ build:'?'}") << ".build)</script>" << "</td>"
-            "<td><button onclick='action(\"/otaupdate/" << mac << "\")'>&#x2913;</button></td>"
-            "</tr>";
+                                                   "<td><script>document.currentScript.replaceWith("
+               << (device[i].info ? device[i].info : "{ model:'?'}") << ".model)</script>" << "</td>"
+                                                                                              "<td><script>document.currentScript.replaceWith(new Date(Date.now()-"
+               << (signed)(now - device[i].lastSeen) << ").toLocaleString())</script></td>"
+                                                        "<td>"
+               << device[i].peerRssi << "</td>"
+                                        "<td><script>document.currentScript.replaceWith("
+               << (device[i].info ? device[i].info : "{ build:'?'}") << ".build)</script>" << "</td>"
+                                                                                              "<td><button onclick='action(\"/otaupdate/"
+               << mac << "\")'>&#x2913;</button></td>"
+                         "</tr>";
         }
       }
     }
@@ -767,20 +769,24 @@ class ConfigPortal : public HttpGetHandler {
     html << "</table>"
             "<h2>WiFi & MQTT</h2>"
             "<table>"
-            "<tr><td>WiFi SSID</td><td><input id='ssid' value='" << sta.ssid << "'></td></tr>"
-            "<tr><td>WiFi password</td><td><input id='pwd' value='" << sta.password << "'></td></tr>"
-            "<tr><td>MQTT server</td><td><input id='mqtt' value='" << mqtt_server << "'></td></tr>"
-            "</table>"
-            "<button onclick='setConfig(this)'>Save</button>"
-            "<button onclick='setNetName(this)'>Set FreeHouse network name</button>"
-            "<button onclick='window.location.href = \"/close/\"'>Restart</button>"
-            "<h2>OTA Update</h2>"
-            "<div>"
-            "  <input type='file' id='firmware'>"
-            "  <button onclick='ota_upload(this)'>Update</button>"
-            "</div>"
-            "<div>Current: " BUILD_TIMESTAMP "</div>"
-            "</body></html>";
+            "<tr><td>WiFi SSID</td><td><input id='ssid' value='"
+         << sta.ssid << "'></td></tr>"
+                        "<tr><td>WiFi password</td><td><input id='pwd' value='"
+         << sta.password << "'></td></tr>"
+                            "<tr><td>MQTT server</td><td><input id='mqtt' value='"
+         << mqtt_server << "'></td></tr>"
+                           "</table>"
+                           "<button onclick='setConfig(this)'>Save</button>"
+                           "<button onclick='setNetName(this)'>Set FreeHouse network name</button>"
+                           "<button onclick='window.location.href = \"/close/\"'>Restart</button>"
+                           "<h2>OTA Update</h2>"
+                           "<div>"
+                           "  <input type='file' id='firmware'>"
+                           "  <button onclick='ota_upload(this)'>Update</button>"
+                           "</div>"
+                           "<div>Current: " BUILD_TIMESTAMP
+                           "</div>"
+                           "</body></html>";
 
     httpd_resp_send(req, html.str().c_str(), HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
@@ -789,7 +795,7 @@ class ConfigPortal : public HttpGetHandler {
 
 extern "C" void app_main(void) {
   esp_log_level_set(TAG, ESP_LOG_INFO);
-//  esp_log_level_set("*", ESP_LOG_INFO);
+  //  esp_log_level_set("*", ESP_LOG_INFO);
 
   // Initialize NVS
   esp_err_t ret = nvs_flash_init();
@@ -818,10 +824,7 @@ extern "C" void app_main(void) {
 
   nvs_handle_t nvs_handle = -1;
   char mqtt_uri[64] = {0};
-  if (nvs_open("storage", NVS_READWRITE, &nvs_handle) != ESP_OK
-    || ((len = sizeof(wifi_config.sta.ssid)), (nvs_get_str(nvs_handle, "ssid", (char *)wifi_config.sta.ssid, &len) != ESP_OK))
-    || ((len = sizeof(wifi_config.sta.password)), (nvs_get_str(nvs_handle, "wifipwd", (char *)wifi_config.sta.password, &len) != ESP_OK))
-    || ((len = sizeof(mqtt_uri)), (nvs_get_str(nvs_handle, "mqtt", mqtt_uri, &len) != ESP_OK))) {
+  if (nvs_open("storage", NVS_READWRITE, &nvs_handle) != ESP_OK || ((len = sizeof(wifi_config.sta.ssid)), (nvs_get_str(nvs_handle, "ssid", (char *)wifi_config.sta.ssid, &len) != ESP_OK)) || ((len = sizeof(wifi_config.sta.password)), (nvs_get_str(nvs_handle, "wifipwd", (char *)wifi_config.sta.password, &len) != ESP_OK)) || ((len = sizeof(mqtt_uri)), (nvs_get_str(nvs_handle, "mqtt", mqtt_uri, &len) != ESP_OK))) {
     if (nvs_handle != -1) nvs_close(nvs_handle);
 
   no_net_start_captive_portal:
@@ -852,12 +855,12 @@ extern "C" void app_main(void) {
   }
 
   if (nvs_handle != -1) {
-    len = sizeof (passKey);
-    if (nvs_get_blob(nvs_handle, "passkey", passKey, &len) != ESP_OK || len != sizeof (passKey)) {
-      memset(passKey,0,sizeof (passKey));
-      ESP_LOGI(TAG,"No passkey found");
+    len = sizeof(passKey);
+    if (nvs_get_blob(nvs_handle, "passkey", passKey, &len) != ESP_OK || len != sizeof(passKey)) {
+      memset(passKey, 0, sizeof(passKey));
+      ESP_LOGI(TAG, "No passkey found");
     } else {
-      ESP_LOGI(TAG,"Passkey loaded: " MACSTR, MAC2STR(passKey));
+      ESP_LOGI(TAG, "Passkey loaded: " MACSTR, MAC2STR(passKey));
     }
 
     nvs_close(nvs_handle);
@@ -948,9 +951,8 @@ extern "C" void app_main(void) {
   esp_mqtt_client_config_t mqtt_cfg = {
       .broker = {.address = {.uri = mqtt.c_str()}},
       .network = {.disable_auto_reconnect = false},
-      .buffer = { .size = MQTT_BUFFER_SIZE, .out_size = MQTT_BUFFER_SIZE },
-      .outbox = { .limit = MQTT_BUFFER_SIZE }
-    };
+      .buffer = {.size = MQTT_BUFFER_SIZE, .out_size = MQTT_BUFFER_SIZE},
+      .outbox = {.limit = MQTT_BUFFER_SIZE}};
 
   mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
   ESP_ERROR_CHECK_WITHOUT_ABORT(esp_mqtt_client_register_event(mqtt_client, (esp_mqtt_event_id_t)ESP_EVENT_ANY_ID, mqtt_event_handler, NULL));
@@ -963,7 +965,6 @@ extern "C" void app_main(void) {
   int pressed = 0;
   // LED off: running
   GPIO::digitalWrite(IO_LED_G, 0);
-
 
   // static heap_trace_record_t trace_record[10]; // Must be in internal RAM
   // heap_trace_init_standalone(trace_record, 10);
@@ -992,7 +993,7 @@ extern "C" void app_main(void) {
       auto thisFree = esp_get_free_heap_size();
       if (lastFree != thisFree) {
         lastFree = thisFree;
-        ESP_LOGV(TAG,"Free heap %lu", thisFree);
+        ESP_LOGV(TAG, "Free heap %lu", thisFree);
       }
       // heap_trace_dump();
     }
@@ -1006,7 +1007,7 @@ extern "C" void app_main(void) {
         if (dev->name[0] && (dev->ttl && now > dev->ttl)) {
           ESP_LOGI(TAG, "Unpair %s " MACSTR " (%lu > %lu)", dev->name, MAC2STR(dev->mac), now, dev->ttl);
           MACAddr mac;
-          memcpy(mac,dev->mac, sizeof (mac));
+          memcpy(mac, dev->mac, sizeof(mac));
 
           memset(dev->name, 0, sizeof(dev->name));
           memset(dev->mac, 0, sizeof(dev->mac));
