@@ -84,8 +84,6 @@ static wifi_config_t wifi_config = {
         .threshold = {.authmode = WIFI_AUTH_WPA2_PSK},
     }};
 
-static void sendNACK(const uint8_t *mac_addr);
-
 static device_t *findDeviceMac(Locked<device_table_t> &device, const uint8_t *mac) {
   for (int i = 0; i < ESP_NOW_MAX_TOTAL_PEER_NUM; i++) {
     if (memcmp(device[i].mac, mac, sizeof(device[i].mac)) == 0) {
@@ -234,8 +232,6 @@ static void enumerateDevices(Locked<device_table_t> &device, cJSON *hubMsg) {
                   );
           if (shouldUnpair) {
             // This device has already connected to a different hub with a better rssi - remove on the next pass
-            sendNACK(dev->mac);
-
             dev->unpair = true;
             dev->ttl = 1;
           }
@@ -398,6 +394,28 @@ static void sendNACK(const uint8_t *mac_addr) {
   esp_now_del_peer(mac_addr);
 }
 
+static void removeDevice(device_t *dev) {
+  MACAddr mac;
+  memcpy(mac, dev->mac, sizeof(mac));
+
+  memset(dev->name, 0, sizeof(dev->name));
+  memset(dev->mac, 0, sizeof(dev->mac));
+  dev->pending = "";
+  dev->lastSeen = 0;
+  dev->ttl = 0;
+  dev->unpair = false;
+  dev->peerRssi = 0;
+  dev->sentMerged = false;
+
+  if (dev->info) free(dev->info);
+  dev->info = NULL;
+
+  if (esp_now_is_peer_exist(mac)) {
+    esp_now_del_peer(mac);
+  }
+  hubStatusChanged = true;
+}
+
 static void espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status) {
   Locked device(devices);
   const auto dev = findDeviceMac(device, mac_addr);
@@ -431,7 +449,7 @@ static device_t *doPairing(device_t *dev, const esp_now_recv_info_t *esp_now_inf
   if (dev != NULL) {
     if (dev->unpair) {
       sendNACK(dev->mac);
-      dev->ttl = 1;  // Timeout on next attempt
+      removeDevice(dev);
       return dev;
     }
     dev->peerRssi = esp_now_info->rx_ctrl->rssi;
@@ -495,8 +513,7 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
     //   dev = doPairing(dev, esp_now_info, data+4, len-4);
   } else if (verb == NACK[0]) {
     if (dev != NULL) {
-      dev->unpair = true;
-      dev->ttl = 1;  // Timeout on next pass
+        removeDevice(dev);
     } else {
       ESP_LOGI(TAG, "NACK from unknown device " MACSTR, MAC2STR(esp_now_info->src_addr));
     }
@@ -532,7 +549,7 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
       }
       if (dev->unpair) {
         sendNACK(dev->mac);
-        dev->ttl = 1;  // Timeout on next attempt
+        removeDevice(dev);
         return;
       }
     } else {
@@ -541,6 +558,7 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
     }
   } else {
     ESP_LOGI(TAG, "Unknown message from " MACSTR " %s", MAC2STR(esp_now_info->src_addr), data);
+    sendNACK(esp_now_info->src_addr);
   }
 
   if (dev != NULL) {
@@ -1022,24 +1040,7 @@ extern "C" void app_main(void) {
         auto dev = &device[i];
         if (dev->name[0] && (dev->ttl && now > dev->ttl)) {
           ESP_LOGI(TAG, "Unpair %s " MACSTR " (%lu > %lu)", dev->name, MAC2STR(dev->mac), now, dev->ttl);
-          MACAddr mac;
-          memcpy(mac, dev->mac, sizeof(mac));
-
-          memset(dev->name, 0, sizeof(dev->name));
-          memset(dev->mac, 0, sizeof(dev->mac));
-          dev->pending = "";
-          dev->lastSeen = 0;
-          dev->ttl = 0;
-          dev->unpair = false;
-          dev->peerRssi = 0;
-          dev->sentMerged = false;
-
-          if (dev->info) free(dev->info);
-          dev->info = NULL;
-
-          if (esp_now_is_peer_exist(mac)) {
-            esp_now_del_peer(mac);
-          }
+          removeDevice(dev);
           hubStatusChanged = true;
         }
       }
