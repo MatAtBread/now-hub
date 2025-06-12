@@ -489,7 +489,7 @@ static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_
       dev = doPairing(dev, esp_now_info, (const uint8_t *)out, out_len);
       free(out);
     } else {
-      ESP_LOGI(TAG, "JOIN failed to decrypt" MACSTR, MAC2STR(esp_now_info->src_addr));
+      ESP_LOGI(TAG, "JOIN failed to decrypt " MACSTR, MAC2STR(esp_now_info->src_addr));
     }
     // } else if (verb == JOIN[0]) {
     //   dev = doPairing(dev, esp_now_info, data+4, len-4);
