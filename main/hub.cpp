@@ -795,6 +795,7 @@ class ConfigPortal : public HttpGetHandler {
             "<td><script>document.currentScript.replaceWith(new Date(Date.now()-" << (signed)(now - device[i].lastSeen) << ").toLocaleString())</script></td>"
             "<td>" << device[i].peerRssi << "</td>"
             "<td><script>document.currentScript.replaceWith(" << (device[i].info ? device[i].info : "{ build:'?'}") << ".build)</script>" << "</td>"
+            "<td><script>document.currentScript.replaceWith(String(" << (device[i].info ? device[i].info : "{ state_version:'?'}") << ".state_version))</script>" << "</td>"
             "<td><button onclick='action(\"/otaupdate/" << mac << "\")'>&#x2913;</button></td>"
             "</tr>";
         }
