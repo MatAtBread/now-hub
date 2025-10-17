@@ -778,7 +778,7 @@ class ConfigPortal : public HttpGetHandler {
             "<h1>" << hostname << " (" << hub_ip << ")</h1>"
             "<h2>Devices</h2>"
             "<table>"
-            "<tr><th>Unpair</th><th>Name</th><th>Model</th><th>Last seen</th><th>Rssi</th><th>Build</th><th>Update</th></tr>";
+            "<tr><th>Unpair</th><th>Name</th><th>Model</th><th>Last seen</th><th>Rssi</th><th>Build</th><th>state</th><th>Update</th></tr>";
 
     {
       Locked device(devices);
