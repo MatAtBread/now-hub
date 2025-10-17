@@ -3,9 +3,9 @@
 #include <sstream>
 #include <string>
 
-#include "../common/captiveportal/wifi-captiveportal.h"
-#include "../common/encryption/encryption.h"
-#include "../common/gpio/gpio.hpp"
+#include "./common/captiveportal/wifi-captiveportal.h"
+#include "./common/encryption/encryption.h"
+#include "./common/gpio/gpio.hpp"
 #include "./read_write_lock/rwl.hpp"
 #include "esp_log.h"
 // #include "esp_heap_trace.h"
