@@ -10,20 +10,23 @@ extern "C" const char* TAG;
 static void adc_calibration_deinit(adc_cali_handle_t handle);
 static bool adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_atten_t atten, adc_cali_handle_t *out_handle);
 
-static PinMode lastMode[GPIO_NUM_MAX];
+static PinMode lastMode[GPIO_NUM_MAX] = {(PinMode)0};
 static bool lastWrite[GPIO_NUM_MAX];
 
 void GPIO::pinMode(int pin, PinMode mode) {
-  gpio_config_t cfg = {
-    .pin_bit_mask = 1ULL << pin,
-    .mode = mode == INPUT ? GPIO_MODE_INPUT : GPIO_MODE_OUTPUT, // Also, OD variants
-    .pull_up_en = GPIO_PULLUP_DISABLE,
-    .pull_down_en = GPIO_PULLDOWN_DISABLE,
-    .intr_type = GPIO_INTR_DISABLE
-  };
-  gpio_config(&cfg);
-  lastMode[pin] = mode;
-  gpio_set_direction((gpio_num_t)pin, (gpio_mode_t)mode);
+  if (lastMode[pin] != mode) {
+    gpio_reset_pin((gpio_num_t)pin);
+    gpio_config_t cfg = {
+      .pin_bit_mask = 1ULL << pin,
+      .mode = mode == INPUT ? GPIO_MODE_INPUT : GPIO_MODE_OUTPUT, // Also, OD variants
+      .pull_up_en = GPIO_PULLUP_DISABLE,
+      .pull_down_en = GPIO_PULLDOWN_DISABLE,
+      .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&cfg);
+    lastMode[pin] = mode;
+    gpio_set_direction((gpio_num_t)pin, (gpio_mode_t)mode);
+  }
 }
 
 void GPIO::digitalWrite(int pin, bool value) {

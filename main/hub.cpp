@@ -22,9 +22,9 @@
 // These should be configurable
 const char *MQTT_TOPIC = "FreeHouse";
 #define OTA_ROOT_URI "http://files.mailed.me.uk/public/freehouse/"
-#define IO_LED_R 3
-#define IO_LED_G 4
-#define IO_LED_B 5
+// #define IO_LED_R 3
+// #define IO_LED_G 4
+// #define IO_LED_B 5
 #define IO_BUTTON 9
 
 #define DEVICE_TIMEOUT 20 * 60 * 1000UL  // 20 mins
@@ -416,13 +416,13 @@ static void removeDevice(device_t *dev) {
   hubStatusChanged = true;
 }
 
-static void espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status) {
+static void espnow_send_cb(const esp_now_send_info_t *tx_info, esp_now_send_status_t status) {
   Locked device(devices);
-  const auto dev = findDeviceMac(device, mac_addr);
+  const auto dev = findDeviceMac(device, tx_info->des_addr);
 
   if (status != ESP_OK) {
     // debug, as it will be sent when the device connects with a PACK from the .pending member
-    ESP_LOGD(TAG, "Send to " MACSTR " (device %s) failed", MAC2STR(mac_addr), dev ? dev->name : "?");
+    ESP_LOGD(TAG, "Send to " MACSTR " (device %s) failed", MAC2STR(tx_info->des_addr), dev ? dev->name : "?");
   } else {
     if (dev != NULL) {
       if (dev->pending.length()) {
@@ -846,9 +846,6 @@ extern "C" void app_main(void) {
   ESP_ERROR_CHECK(esp_netif_init());
   ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-  GPIO::pinMode(IO_LED_R, OUTPUT);
-  GPIO::pinMode(IO_LED_G, OUTPUT);
-  GPIO::pinMode(IO_LED_B, OUTPUT);
   GPIO::pinMode(IO_BUTTON, INPUT);
 
   // If no config, start the captive portal
@@ -872,20 +869,8 @@ extern "C" void app_main(void) {
     auto portal = new ConfigPortal(wifi_config.sta, mqtt_uri);
     start_captive_portal(portal, "FreeHouse-HUB");
 
-    bool led = true;
     while (true) {
-      led = !led;
-      // Flashing magenta - captive portal is running
-      GPIO::digitalWrite(IO_LED_B, led);
-      GPIO::digitalWrite(IO_LED_R, led);
-      GPIO::digitalWrite(IO_LED_G, 0);
-
       vTaskDelay(1000 / portTICK_PERIOD_MS);
-      // if (portal->done) {
-      //   GPIO::digitalWrite(IO_LED_B, 0);
-      //   GPIO::digitalWrite(IO_LED_R, 0);
-      //   esp_restart();
-      // }
     }
   }
 
@@ -934,9 +919,6 @@ extern "C" void app_main(void) {
   // Start WiFi
   ESP_ERROR_CHECK(esp_wifi_start());
 
-  // Yellow LED - connecting
-  GPIO::digitalWrite(IO_LED_R, 1);
-  GPIO::digitalWrite(IO_LED_G, 1);
   ESP_LOGI(TAG, "Connecting to WiFi %s", wifi_config.sta.ssid);
   if (xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, 30000 / portTICK_PERIOD_MS) & WIFI_CONNECTED_BIT) {
     ESP_LOGI(TAG, "Connected to WiFi %s", wifi_config.sta.ssid);
@@ -953,9 +935,6 @@ extern "C" void app_main(void) {
   esp_err_t result = esp_wifi_get_channel(&primary_channel, &secondary_channel);
 
   if (result != ESP_OK) {
-    // Red LED - no network
-    GPIO::digitalWrite(IO_LED_R, 1);
-    GPIO::digitalWrite(IO_LED_G, 0);
     ESP_LOGE(TAG, "Failed to get channel: %d", result);
     return;
   }
@@ -964,9 +943,6 @@ extern "C" void app_main(void) {
   ESP_ERROR_CHECK_WITHOUT_ABORT(esp_netif_get_ip_info(netif, &ip_info));
   snprintf(hub_ip, sizeof(hub_ip), IPSTR, IP2STR(&ip_info.ip));
 
-  // Green LED - connected
-  GPIO::digitalWrite(IO_LED_R, 0);
-  GPIO::digitalWrite(IO_LED_G, 1);
   ESP_LOGI(TAG,
            "WiFi connected %s: Primary channel: %d, Secondary channel: %d, IP %s, MAC " MACSTR,
            wifi_config.sta.ssid,
@@ -998,9 +974,6 @@ extern "C" void app_main(void) {
   start_web_server(portal);
 
   int pressed = 0;
-  // LED off: running
-  GPIO::digitalWrite(IO_LED_G, 0);
-
   // static heap_trace_record_t trace_record[10]; // Must be in internal RAM
   // heap_trace_init_standalone(trace_record, 10);
   // heap_trace_start(HEAP_TRACE_LEAKS);
@@ -1008,7 +981,6 @@ extern "C" void app_main(void) {
   uint32_t lastFree = 0;
   while (1) {
     auto button = GPIO::digitalRead(IO_BUTTON);
-    GPIO::digitalWrite(IO_LED_B, !button);
     if (button == 0) {
       // Check for BOOT button, clear the nvs and restart
       if (++pressed == 10) {
@@ -1017,10 +989,8 @@ extern "C" void app_main(void) {
         nvs_erase_key(nvs_handle, "wifipwd");
         nvs_erase_key(nvs_handle, "mqtt");
         nvs_close(nvs_handle);
-        GPIO::digitalWrite(IO_LED_B, 0);
         esp_restart();
       }
-      GPIO::digitalWrite(IO_LED_B, pressed & 1);
       vTaskDelay(250 / portTICK_PERIOD_MS);
     } else {
       pressed = 0;
