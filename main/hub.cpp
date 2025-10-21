@@ -306,6 +306,7 @@ static bool mergeAndSendPending(device_t *device, const char *str) {
 }
 
 static int mqtt_client_publish(esp_mqtt_client_handle_t client, const char *topic, const char *data, int len, int qos, int retain) {
+  ESP_LOGV(TAG, "mqtt_client_publish %s (%d) retain %d", topic, len, retain);
   auto r = esp_mqtt_client_publish(client, topic, data, len, qos, retain);
   if (r < 0) {
     ESP_LOGW(TAG, "mqtt_client_publish %s (%d) failed with %d", topic, len, r);
@@ -344,21 +345,23 @@ static void mqtt_event_handler(void *args, esp_event_base_t base,
         auto str = std::string(event->data, event->data_len);
         checkPromiscuousDevices(device, str.c_str());
       } else {
-        if (!name || !subtopic || strcmp(root, MQTT_TOPIC) || strcmp(subtopic, "set") || (dev = findDeviceName(device, name)) == NULL) {
+        if (name && !subtopic && (dev = findDeviceName(device, name)) && event->data_len == 0) {
+          ESP_LOGI(TAG, "MQTT delete topic %s/%s/%s", root ? root : "?", name ? name : "?", subtopic ? subtopic : "?");
+          dev->unpair = true;
+          dev->ttl = 1;
+        }
+        else if (!name || !subtopic || strcmp(root, MQTT_TOPIC) || strcmp(subtopic, "set") || (dev = findDeviceName(device, name)) == NULL) {
           ESP_LOGV(TAG, "Ignore hub mqtt message %s/%s/%s", root ? root : "?", name ? name : "?", subtopic ? subtopic : "?");
         } else {
-          if (event->data_len >= ESP_NOW_MAX_DATA_LEN_V2) {
-            ESP_LOGI(TAG, "Too much data for esp-now v2: %s %80s", name, event->data);
-          } else if (event->data_len) {
-            auto str = std::string(event->data, event->data_len);
-            if (mergeAndSendPending(dev, str.c_str())) {
-              dev->sentMerged = true;
-              // ESP_LOGI(TAG, "Sent merged message to %.*s", event->topic_len, event->topic);
+            if (event->data_len >= ESP_NOW_MAX_DATA_LEN_V2) {
+              ESP_LOGI(TAG, "Too much data for esp-now v2: %s %80s", name, event->data);
+            } else if (event->data_len) {
+              auto str = std::string(event->data, event->data_len);
+              if (mergeAndSendPending(dev, str.c_str())) {
+                dev->sentMerged = true;
+                // ESP_LOGV(TAG, "Sent merged message to %.*s", event->topic_len, event->topic);
             }
-          }
-          // else {
-          //   ESP_LOGI(TAG, "Delete topic %.*s", event->topic_len, event->topic);
-          // }
+          } 
         }
       }
       free(topic);
