@@ -615,7 +615,7 @@ class ConfigPortal : public HttpGetHandler {
 
   void redirectHome(httpd_req_t *req) {
     httpd_resp_set_status(req, "307 Temporary Redirect");
-    httpd_resp_set_hdr(req, "Location", "/");
+    httpd_resp_set_hdr(req, "Location", get_portal_redirect_url());
     httpd_resp_send(req, "Redirect", HTTPD_RESP_USE_STRLEN);
   }
 
@@ -629,7 +629,7 @@ class ConfigPortal : public HttpGetHandler {
   esp_err_t getHandler(httpd_req_t *req) {
     if (startsWith(req->uri, "/close")) {
       httpd_resp_set_status(req, "307 Temporary Redirect");
-      httpd_resp_set_hdr(req, "Location", "/");
+      httpd_resp_set_hdr(req, "Location", get_portal_redirect_url());
       httpd_resp_send(req, NULL, 0);  // No response body needed
       // Delay to flush response
       vTaskDelay(100 / portTICK_PERIOD_MS);
