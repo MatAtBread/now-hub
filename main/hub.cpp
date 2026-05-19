@@ -773,6 +773,63 @@ class ConfigPortal : public HttpGetHandler {
               xhr.open('POST', '/ota', true);
               xhr.send(file);
             }
+
+            function showScanOverlay(nets) {
+                var existing = document.getElementById('scan_overlay');
+                if (existing) existing.remove();
+                var overlay = document.createElement('div');
+                overlay.id = 'scan_overlay';
+                overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:100';
+                var box = document.createElement('div');
+                box.style.cssText = 'background:#fff;padding:1em;border-radius:8px;max-width:320px;width:90%;max-height:80vh;overflow-y:auto';
+                var title = document.createElement('h3');
+                title.textContent = 'Select Network';
+                title.style.margin = '0 0 0.5em';
+                box.appendChild(title);
+                if (nets.length === 0) {
+                    var p = document.createElement('p');
+                    p.textContent = 'No networks found';
+                    box.appendChild(p);
+                }
+                nets.forEach(function(net) {
+                    var row = document.createElement('div');
+                    row.style.cssText = 'padding:0.5em;cursor:pointer;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center';
+                    var name = document.createElement('span');
+                    name.textContent = net.ssid;
+                    var rssi = document.createElement('span');
+                    rssi.style.cssText = 'color:#888;font-size:0.85em;margin-left:1em;white-space:nowrap';
+                    rssi.textContent = net.rssi + ' dBm';
+                    row.appendChild(name);
+                    row.appendChild(rssi);
+                    row.onclick = function() {
+                        document.getElementById('ssid').value = net.ssid;
+                        overlay.remove();
+                    };
+                    box.appendChild(row);
+                });
+                var closeBtn = document.createElement('button');
+                closeBtn.textContent = 'Cancel';
+                closeBtn.style.cssText = 'display:block;margin-top:0.5em';
+                closeBtn.onclick = function() { overlay.remove(); };
+                box.appendChild(closeBtn);
+                overlay.appendChild(box);
+                overlay.onclick = function(e) { if (e.target === overlay) overlay.remove(); };
+                document.body.appendChild(overlay);
+            }
+
+            function scanWifi() {
+                var btn = document.getElementById('scan_btn');
+                btn.disabled = true;
+                btn.textContent = 'Scanning...';
+                function done() { btn.disabled = false; btn.textContent = 'Scan'; }
+                fetch('/scan').then(function(res) { return res.json(); }).then(function(nets) {
+                    done();
+                    showScanOverlay(nets);
+                }).catch(function() {
+                    done();
+                    alert('Scan failed');
+                });
+            }
             )
 
             "</script>"
@@ -808,7 +865,7 @@ class ConfigPortal : public HttpGetHandler {
     html << "</table>"
             "<h2>WiFi & MQTT</h2>"
             "<table>"
-            "<tr><td>WiFi SSID</td><td><input id='ssid' value='" << sta.ssid << "'></td></tr>"
+            "<tr><td>WiFi SSID</td><td><input id='ssid' value='" << sta.ssid << "'><button id='scan_btn' onclick='scanWifi()' style='display:inline;margin:0 0 0 0.5em'>Scan</button></td></tr>"
             "<tr><td>WiFi password</td><td><input id='pwd' value='" << sta.password << "'></td></tr>"
             "<tr><td>MQTT server</td><td><input id='mqtt' value='" << mqtt_server << "'></td></tr>"
             "</table>"
